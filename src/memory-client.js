@@ -102,6 +102,12 @@ function errorCode(error) {
   return 'unavailable';
 }
 
+function tokenLimit(requested, configured) {
+  const configLimit = Math.max(1, Number(configured) || 1);
+  const requestLimit = Math.max(1, Number(requested) || configLimit);
+  return Math.min(configLimit, requestLimit);
+}
+
 export class MemoryV1Client {
   constructor(config, { fetchImpl = globalThis.fetch } = {}) {
     this.config = config;
@@ -195,7 +201,7 @@ export class MemoryV1Client {
     return materialResult('recent_continuity', [
       ...timelineItems.slice().reverse().map((item) => fragmentFor(item, 'recall_timeline')),
       ...surfaceItems.map((item) => fragmentFor(item, 'surface')),
-    ], maxTokens);
+    ], tokenLimit(maxTokens, this.config.maxTokens));
   }
 
   async recentMaterial({ maxTokens = this.config.maxTokens } = {}) {
@@ -228,7 +234,7 @@ export class MemoryV1Client {
     return materialResult(kind, [
       ...details.map((item) => fragmentFor(item, 'fetch', true)),
       ...items.map((item) => fragmentFor(item, 'search')),
-    ], maxTokens);
+    ], tokenLimit(maxTokens, this.config.maxTokens));
   }
 }
 

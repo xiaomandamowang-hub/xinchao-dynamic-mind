@@ -48,6 +48,16 @@ test('recent continuity unions timeline and surface with provenance and deduplic
   assert.equal(material.readOnly, true);
 });
 
+test('caller budgets can narrow but never expand the configured hard limit', async () => {
+  const client = new MemoryV1Client(config({ maxTokens: 80 }));
+  client.call = async (name) => response({ items: name === 'surface' ? [
+    { id: 'mem_long', title: 'Long', summary: 'long material '.repeat(100), type: 'core', source: 'ChatGPT' },
+  ] : [] });
+  const material = await client.recentContinuityMaterial({ maxTokens: 1600 });
+  assert.ok(material.estimatedTokens <= 80);
+  assert.equal(material.truncated, true);
+});
+
 test('recent material searches summaries then fetches only the configured details', async () => {
   const client = new MemoryV1Client(config({ detailFetches: 1 }));
   const calls = [];
