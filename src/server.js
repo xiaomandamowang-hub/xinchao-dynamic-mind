@@ -7,6 +7,7 @@ import { StateStore } from './state-store.js';
 import { ModelClient } from './model-client.js';
 import { OmbreClient } from './ombre-client.js';
 import { MemoryV1Client, MemoryV1ShadowObserver } from './memory-client.js';
+import { ShadowContextCompositionRunner } from './shadow-context-composer.js';
 import { BarkClient } from './bark-client.js';
 import { readOmbreHeartbeat } from './heartbeat-store.js';
 import { buildContextEnvelope, contextDeliveryState, recordContextDelivery } from './context-envelope.js';
@@ -24,6 +25,13 @@ const ombre = new OmbreClient(config.ombre);
 const memoryV1 = new MemoryV1Client(config.memoryV1);
 const memoryV1Shadow = new MemoryV1ShadowObserver(memoryV1, {
   ttlMinutes: config.memoryV1.dedupeTtlMinutes,
+});
+const shadowContextComposition = new ShadowContextCompositionRunner(memoryV1, {
+  ttlMinutes: config.memoryV1.dedupeTtlMinutes,
+  maxTokens: config.memoryV1.shadowContextMaxTokens,
+  memoryMaxRatio: config.memoryV1.shadowContextMemoryMaxRatio,
+  maxMemoryReferences: config.memoryV1.shadowContextMaxReferences,
+  perMemoryMaxTokens: config.memoryV1.shadowContextPerMemoryMaxTokens,
 });
 const bark = new BarkClient(config.bark);
 const journal = new TransitionJournal(config.journalPath);
@@ -46,12 +54,16 @@ async function observeMemoryV1(kind, options = {}) {
     estimatedTokens: diagnostic.estimatedTokens,
     truncated: diagnostic.truncated,
     errorCode: diagnostic.errorCode,
-    provenance: diagnostic.provenance?.map((item) => ({
-      memoryId: item.memory_id,
-      sourceType: item.source_type,
-      tool: item.retrieval_tool,
-    })),
   });
+}
+
+async function composeMemoryV1ShadowContext(baseEnvelope, { sessionId, now }) {
+  const result = await shadowContextComposition.compose({
+    baseEnvelope,
+    sessionId,
+    now,
+  });
+  log('memory_v1_shadow_context_composed', result.diagnostic);
 }
 
 async function updateState(meta, mutate) {
@@ -128,10 +140,12 @@ async function runCycle() {
     const proactiveContactIsIdle = contactIdleAllowed(state, now, config.heartbeat.proactiveMinIdleHours);
 
     if (dreamAllowed(state, now, config.dreamMinIntervalHours, config.dreamMaxPerDay)) {
-      void observeMemoryV1('recentMaterial', {
-        dedupeKey: `dream:${now.toISOString()}`,
-        now,
-      });
+      if (!config.memoryV1.shadowContextEnabled) {
+        void observeMemoryV1('recentMaterial', {
+          dedupeKey: `dream:${now.toISOString()}`,
+          now,
+        });
+      }
       let material = '';
       if (!config.shadowMode && config.ombre.readEnabled) {
         try { material = await ombre.recentMaterial(); }
@@ -206,10 +220,12 @@ async function runCycle() {
     }
 
     if (!config.shadowMode && config.bark.enabled && proactiveContactIsIdle && !dreamCreated && proactiveBarkAllowed(state, now, config.bark.autonomousMinIntervalHours, config.bark.maxPerDay, config.bark.minDrive)) {
-      void observeMemoryV1('thoughtMaterial', {
-        dedupeKey: `thought:${now.toISOString()}`,
-        now,
-      });
+      if (!config.memoryV1.shadowContextEnabled) {
+        void observeMemoryV1('thoughtMaterial', {
+          dedupeKey: `thought:${now.toISOString()}`,
+          now,
+        });
+      }
       let selected;
       let modelFailed = false;
       try {
@@ -416,11 +432,15 @@ async function createContextEnvelope({
     force,
   });
   if (envelope.delivered && mode === 'session_start') {
-    void observeMemoryV1('recentContinuityMaterial', {
-      dedupeKey: `context:${sessionId}`,
-      now,
-      maxTokens: config.context.ombreMaxTokens,
-    });
+    if (config.memoryV1.enabled && config.memoryV1.shadowEnabled && config.memoryV1.shadowContextEnabled) {
+      void composeMemoryV1ShadowContext(envelope, { sessionId, now });
+    } else {
+      void observeMemoryV1('recentContinuityMaterial', {
+        dedupeKey: `context:${sessionId}`,
+        now,
+        maxTokens: config.context.ombreMaxTokens,
+      });
+    }
   }
   if (envelope.delivered) {
     state = await updateState({

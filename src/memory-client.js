@@ -32,6 +32,8 @@ function provenanceFor(item, tool) {
     retrieval_tool: tool,
     occurred_at: item?.occurred_at ?? null,
     status: item?.status ?? null,
+    review_state: item?.review_state ?? null,
+    supersedes: Array.isArray(item?.supersedes) ? item.supersedes.slice(0, 20) : [],
   };
 }
 
@@ -41,9 +43,16 @@ function fragmentFor(item, tool, detail = false) {
   const title = compact(item?.title || 'Memory');
   const content = compact(detail ? (item?.content || item?.summary) : (item?.summary || item?.content));
   if (!content) return null;
-  const marker = `[memory_id=${provenance.memory_id} source_type=${provenance.source_type} via=${tool}]`;
+  const marker = [
+    `memory_id=${provenance.memory_id}`,
+    `source_type=${provenance.source_type}`,
+    `via=${tool}`,
+    provenance.status ? `status=${provenance.status}` : '',
+  ].filter(Boolean).join(' ');
   return {
-    text: `${marker} ${title}: ${content}`,
+    text: `[${marker}] ${title}: ${content}`,
+    title,
+    content,
     provenance,
   };
 }
@@ -204,10 +213,10 @@ export class MemoryV1Client {
     ], tokenLimit(maxTokens, this.config.maxTokens));
   }
 
-  async recentMaterial({ maxTokens = this.config.maxTokens } = {}) {
+  async recentMaterial({ query, maxTokens = this.config.maxTokens } = {}) {
     return this.#searchMaterial({
       kind: 'recent_material',
-      query: '近期重要记忆、关系变化、共同事件、仍在进行的项目与未完成事项',
+      query: compact(query) || '近期重要记忆、关系变化、共同事件、仍在进行的项目与未完成事项',
       maxTokens,
     });
   }

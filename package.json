@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node src/server.js",
     "test": "node --test",
-    "smoke:memory-v1": "node scripts/smoke-memory-v1.js"
+    "smoke:memory-v1": "node scripts/smoke-memory-v1.js",
+    "evaluate:shadow-context": "node scripts/evaluate-shadow-context.js"
   },
   "engines": {
     "node": ">=20"
