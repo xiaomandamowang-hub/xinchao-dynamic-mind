@@ -43,6 +43,18 @@ export function loadConfig() {
       breathMaxResults: number('OMBRE_BREATH_MAX_RESULTS', 3, 1, 10),
       breathMaxTokens: number('OMBRE_BREATH_MAX_TOKENS', 800, 200, 3000)
     },
+    memoryV1: {
+      enabled: bool('MEMORY_V1_ENABLED', false),
+      shadowEnabled: bool('MEMORY_V1_SHADOW_ENABLED', false),
+      url: process.env.MEMORY_V1_MCP_URL ?? '',
+      token: process.env.MEMORY_V1_MCP_TOKEN ?? '',
+      timeoutMs: number('MEMORY_V1_TIMEOUT_MS', 8000, 500, 30000),
+      maxResults: number('MEMORY_V1_MAX_RESULTS', 6, 1, 12),
+      maxTokens: number('MEMORY_V1_MAX_TOKENS', 900, 200, 3000),
+      detailFetches: number('MEMORY_V1_DETAIL_FETCHES', 1, 0, 3),
+      continuityDays: number('MEMORY_V1_CONTINUITY_DAYS', 30, 1, 365),
+      dedupeTtlMinutes: number('MEMORY_V1_DEDUPE_TTL_MINUTES', 30, 1, 1440),
+    },
     context: {
       enabled: bool('CONTEXT_ENVELOPE_ENABLED', true),
       ombreEnabled: bool('CONTEXT_OMBRE_ENABLED', false),
@@ -114,16 +126,20 @@ export function validateConfig(config) {
     || config.ombre.writeEnabled
     || config.context.ombreEnabled
   );
-  if (!externalMemoryEnabled) return config;
-  if (!String(config.ombre.url || '').trim()) {
-    throw new Error(
-      'OMBRE_MCP_URL is required when external memory integration is enabled'
-    );
+  if (externalMemoryEnabled) {
+    if (!String(config.ombre.url || '').trim()) {
+      throw new Error(
+        'OMBRE_MCP_URL is required when external memory integration is enabled'
+      );
+    }
+    if (!String(config.ombre.token || '').trim()) {
+      throw new Error(
+        'OMBRE_MCP_TOKEN is required when external memory integration is enabled'
+      );
+    }
   }
-  if (!String(config.ombre.token || '').trim()) {
-    throw new Error(
-      'OMBRE_MCP_TOKEN is required when external memory integration is enabled'
-    );
+  if (config.memoryV1?.enabled && !String(config.memoryV1.url || '').trim()) {
+    throw new Error('MEMORY_V1_MCP_URL is required when Memory V1 is enabled');
   }
   return config;
 }

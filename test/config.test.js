@@ -16,6 +16,11 @@ function config(overrides = {}) {
       ombreEnabled: false,
       ...(overrides.context || {}),
     },
+    memoryV1: {
+      enabled: false,
+      url: '',
+      ...(overrides.memoryV1 || {}),
+    },
   };
 }
 
@@ -57,6 +62,17 @@ test('authenticated external memory configuration is accepted', () => {
       token: 'server-side-bearer',
       readEnabled: true,
     },
+  });
+  assert.equal(validateConfig(value), value);
+});
+
+test('Memory V1 remains optional and requires only an endpoint when enabled', () => {
+  assert.throws(
+    () => validateConfig(config({ memoryV1: { enabled: true } })),
+    /MEMORY_V1_MCP_URL is required/,
+  );
+  const value = config({
+    memoryV1: { enabled: true, url: 'http://127.0.0.1:18120/mcp' },
   });
   assert.equal(validateConfig(value), value);
 });

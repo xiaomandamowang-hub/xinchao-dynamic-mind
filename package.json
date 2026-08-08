@@ -6,7 +6,8 @@
   "license": "MIT",
   "scripts": {
     "start": "node src/server.js",
-    "test": "node --test"
+    "test": "node --test",
+    "smoke:memory-v1": "node scripts/smoke-memory-v1.js"
   },
   "engines": {
     "node": ">=20"

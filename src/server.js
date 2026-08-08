@@ -6,6 +6,7 @@ import { selectUniqueBark } from './bark-dedupe.js';
 import { StateStore } from './state-store.js';
 import { ModelClient } from './model-client.js';
 import { OmbreClient } from './ombre-client.js';
+import { MemoryV1Client, MemoryV1ShadowObserver } from './memory-client.js';
 import { BarkClient } from './bark-client.js';
 import { readOmbreHeartbeat } from './heartbeat-store.js';
 import { buildContextEnvelope, contextDeliveryState, recordContextDelivery } from './context-envelope.js';
@@ -20,6 +21,10 @@ if (!config.serviceToken) throw new Error('SERVICE_TOKEN is required');
 const store = new StateStore(config.statePath, () => newState());
 const model = new ModelClient(config.model);
 const ombre = new OmbreClient(config.ombre);
+const memoryV1 = new MemoryV1Client(config.memoryV1);
+const memoryV1Shadow = new MemoryV1ShadowObserver(memoryV1, {
+  ttlMinutes: config.memoryV1.dedupeTtlMinutes,
+});
 const bark = new BarkClient(config.bark);
 const journal = new TransitionJournal(config.journalPath);
 const oauth = new OAuthProvider(config.oauth, (event, fields = {}) => log(event, fields));
@@ -28,6 +33,25 @@ let cyclePromise = null;
 
 function log(event, fields = {}) {
   console.log(JSON.stringify({ at: new Date().toISOString(), event, ...fields }));
+}
+
+async function observeMemoryV1(kind, options = {}) {
+  if (!config.memoryV1.enabled || !config.memoryV1.shadowEnabled) return;
+  const diagnostic = await memoryV1Shadow.observe(kind, options);
+  log('memory_v1_shadow_read', {
+    kind: diagnostic.kind,
+    status: diagnostic.status,
+    latencyMs: diagnostic.latencyMs,
+    resultCount: diagnostic.resultCount,
+    estimatedTokens: diagnostic.estimatedTokens,
+    truncated: diagnostic.truncated,
+    errorCode: diagnostic.errorCode,
+    provenance: diagnostic.provenance?.map((item) => ({
+      memoryId: item.memory_id,
+      sourceType: item.source_type,
+      tool: item.retrieval_tool,
+    })),
+  });
 }
 
 async function updateState(meta, mutate) {
@@ -104,6 +128,10 @@ async function runCycle() {
     const proactiveContactIsIdle = contactIdleAllowed(state, now, config.heartbeat.proactiveMinIdleHours);
 
     if (dreamAllowed(state, now, config.dreamMinIntervalHours, config.dreamMaxPerDay)) {
+      void observeMemoryV1('recentMaterial', {
+        dedupeKey: `dream:${now.toISOString()}`,
+        now,
+      });
       let material = '';
       if (!config.shadowMode && config.ombre.readEnabled) {
         try { material = await ombre.recentMaterial(); }
@@ -178,6 +206,10 @@ async function runCycle() {
     }
 
     if (!config.shadowMode && config.bark.enabled && proactiveContactIsIdle && !dreamCreated && proactiveBarkAllowed(state, now, config.bark.autonomousMinIntervalHours, config.bark.maxPerDay, config.bark.minDrive)) {
+      void observeMemoryV1('thoughtMaterial', {
+        dedupeKey: `thought:${now.toISOString()}`,
+        now,
+      });
       let selected;
       let modelFailed = false;
       try {
@@ -383,6 +415,13 @@ async function createContextEnvelope({
     alreadyDelivered: delivery.alreadyDelivered,
     force,
   });
+  if (envelope.delivered && mode === 'session_start') {
+    void observeMemoryV1('recentContinuityMaterial', {
+      dedupeKey: `context:${sessionId}`,
+      now,
+      maxTokens: config.context.ombreMaxTokens,
+    });
+  }
   if (envelope.delivered) {
     state = await updateState({
       type: 'context_delivery',
@@ -617,7 +656,7 @@ const server = createServer(async (request, response) => {
   }
 });
 
-server.listen(config.port, '0.0.0.0', async () => {
+server.listen(config.port, '127.0.0.1', async () => {
   await store.read();
   log('service_started', { port: config.port, shadow: config.shadowMode, modelEnabled: config.model.enabled, barkEnabled: config.bark.enabled });
 });
