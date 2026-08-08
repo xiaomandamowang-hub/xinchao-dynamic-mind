@@ -173,6 +173,42 @@ export const XINCHAO_TOOLS = [
   },
 ];
 
+function triggerPolicyEnabled(policy = {}) {
+  return policy?.enabled === true;
+}
+
+function toolsForTriggerPolicy(policy = {}) {
+  const tools = structuredClone(XINCHAO_TOOLS);
+  if (!triggerPolicyEnabled(policy)) return tools;
+  const longGapHours = Math.max(1, Math.min(72, Number(policy.contextLongGapHours) || 6));
+  const context = tools.find((tool) => tool.name === 'xinchao_context');
+  context.description += [
+    '触发策略：每个新聊天窗口首次响应前优先调用一次。',
+    `同一窗口仅在明确间隔至少 ${longGapHours} 小时、且需要恢复连续性时再次调用，并设置 force=true。`,
+    '普通连续对话、每轮回答、刚调用后或仅为检查状态时不要调用。',
+  ].join('');
+  const event = tools.find((tool) => tool.name === 'xinchao_event');
+  event.description += [
+    '触发策略：只在一次有意义互动已经明确完成后调用一次，不要在互动开始前预记。',
+    '问候、简短确认、普通追问、工具执行过程、失败或未完成的任务、以及每轮机械记录都不触发。',
+    'companionship 仅用于形成了持续陪伴的交流；task_progress 仅用于完成了具体里程碑；',
+    'reflection 仅用于完成了实质沉淀；conflict 仅用于真实冲突；reconciliation 仅用于此前冲突已明确和解。',
+    '其他允许类型也必须是已经完成且结果清楚的真实互动；不确定就不调用。',
+  ].join('');
+  return tools;
+}
+
+function triggerPolicyInstructions(policy = {}) {
+  if (!triggerPolicyEnabled(policy)) return [];
+  const longGapHours = Math.max(1, Math.min(72, Number(policy.contextLongGapHours) || 6));
+  return [
+    '不要每轮机械调用心潮工具。',
+    `新聊天窗口首次响应前调用一次 xinchao_context；同一窗口仅在明确间隔至少 ${longGapHours} 小时且需要恢复连续性时再次调用。`,
+    '仅在有意义互动已经完成且结果明确时调用一次 xinchao_event；问候、简短确认、普通追问、执行过程和未完成任务不触发。',
+    '无法确定是否满足触发条件时，跳过调用。',
+  ];
+}
+
 function response(id, result) {
   return { jsonrpc: '2.0', id, result };
 }
@@ -305,6 +341,7 @@ export async function handleMcpMessage(payload, handlers) {
     return { status: 202, body: null };
   }
   if (method === 'initialize') {
+    const triggerInstructions = triggerPolicyInstructions(handlers.triggerPolicy);
     return {
       status: 200,
       body: response(id, {
@@ -320,6 +357,7 @@ export async function handleMcpMessage(payload, handlers) {
           '一次实际互动后可调用 xinchao_event 更新窗口短状态；event_id 必须唯一，重试时复用。',
           '需要换窗续接时可调用 xinchao_handoff_note 保存近期进度摘要；不要提交聊天原文或人物基岩。',
           '只有结果明确的真实互动才填写 interaction_type；不要提交聊天正文或欲望数值。',
+          ...triggerInstructions,
         ].join(''),
       }),
     };
@@ -328,7 +366,7 @@ export async function handleMcpMessage(payload, handlers) {
     return { status: 200, body: response(id, {}) };
   }
   if (method === 'tools/list') {
-    return { status: 200, body: response(id, { tools: XINCHAO_TOOLS }) };
+    return { status: 200, body: response(id, { tools: toolsForTriggerPolicy(handlers.triggerPolicy) }) };
   }
   if (method === 'tools/call') {
     try {

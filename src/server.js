@@ -593,6 +593,7 @@ const server = createServer(async (request, response) => {
       const sessionId = transportSessionId(request, payload?.method === 'initialize');
       const result = await handleMcpMessage(payload, {
         defaultSessionId: sessionId,
+        triggerPolicy: config.chatgptTrigger,
         context: async (args) => {
           if (!config.context.enabled) throw new Error('心潮 Context Envelope 当前未启用');
           return createContextEnvelope(args);

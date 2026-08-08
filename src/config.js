@@ -89,6 +89,10 @@ export function loadConfig() {
       maxEffectsPerDay: number('INTERACTION_MAX_EFFECTS_PER_DAY', 24, 1, 96),
       timeZone: process.env.INTERACTION_TIME_ZONE ?? process.env.SETTLE_TIME_ZONE ?? 'Asia/Shanghai',
     },
+    chatgptTrigger: {
+      enabled: bool('CHATGPT_TRIGGER_POLICY_ENABLED', false),
+      contextLongGapHours: number('CHATGPT_TRIGGER_CONTEXT_LONG_GAP_HOURS', 6, 1, 72),
+    },
     heartbeat: {
       filePath: process.env.OMBRE_HEARTBEAT_FILE ?? '/memory-data/heartbeat.json',
       // Dream residue may be shared after a shorter quiet period. Autonomous

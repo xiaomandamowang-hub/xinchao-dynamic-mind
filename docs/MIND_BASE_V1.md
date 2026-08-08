@@ -23,6 +23,24 @@ zero Memory. Failure returns the original Context Envelope.
 `MEMORY_V1_CONTEXT_ENABLED=false` immediately rolls formal Context back to the
 pre-Memory envelope without removing the Adapter or the Phase 2b shadow path.
 
+## ChatGPT trigger policy
+
+`CHATGPT_TRIGGER_POLICY_ENABLED=true` adds a narrow routing policy to the MCP
+server instructions and tool descriptions. ChatGPT is asked to call Context
+once before the first response in a new chat, or after a clearly long gap when
+continuity is needed. It is asked to submit one Event only after a meaningful
+interaction has completed with a clear result. Greetings, short confirmations,
+ordinary follow-ups, work in progress, and per-turn bookkeeping do not trigger
+an Event.
+
+The default long gap is six hours and is configurable with
+`CHATGPT_TRIGGER_CONTEXT_LONG_GAP_HOURS`. Setting the policy flag to `false`
+and restarting only `xinchao-chatgpt` restores the original Mind Base v1 MCP
+instructions. The policy does not let the MCP server force the ChatGPT client
+to call a tool; it only makes model-side routing more explicit. Server-side
+session delivery suppression, event idempotency, daily limits, and fixed drive
+mappings remain authoritative.
+
 ## Interaction contract
 
 `xinchao_event` accepts the existing allowlisted interaction types and an

@@ -70,6 +70,47 @@ test('tools/list exposes context, event and short handoff note tools', async () 
   );
 });
 
+test('enabled ChatGPT trigger policy advertises sparse context and event conditions', async () => {
+  const policyHandlers = {
+    ...handlers(),
+    triggerPolicy: { enabled: true, contextLongGapHours: 6 },
+  };
+  const initialized = await handleMcpMessage({
+    jsonrpc: '2.0',
+    id: 21,
+    method: 'initialize',
+    params: { protocolVersion: '2025-06-18' },
+  }, policyHandlers);
+  assert.match(initialized.body.result.instructions, /不要每轮机械调用/);
+  assert.match(initialized.body.result.instructions, /至少 6 小时/);
+
+  const listed = await handleMcpMessage({
+    jsonrpc: '2.0',
+    id: 22,
+    method: 'tools\/list',
+  }, policyHandlers);
+  const context = listed.body.result.tools.find((tool) => tool.name === 'xinchao_context');
+  const event = listed.body.result.tools.find((tool) => tool.name === 'xinchao_event');
+  assert.match(context.description, /新聊天窗口首次响应前优先调用一次/);
+  assert.match(context.description, /普通连续对话.*不要调用/);
+  assert.match(event.description, /问候、简短确认、普通追问/);
+  assert.match(event.description, /task_progress 仅用于完成了具体里程碑/);
+  assert.match(event.description, /不确定就不调用/);
+});
+
+test('disabled ChatGPT trigger policy preserves the Mind Base v1 tool contract', async () => {
+  const listed = await handleMcpMessage({
+    jsonrpc: '2.0',
+    id: 23,
+    method: 'tools\/list',
+  }, {
+    ...handlers(),
+    triggerPolicy: { enabled: false, contextLongGapHours: 6 },
+  });
+  assert.doesNotMatch(listed.body.result.tools[0].description, /触发策略/);
+  assert.doesNotMatch(listed.body.result.tools[1].description, /触发策略/);
+});
+
 test('xinchao_context returns injectable text and structured envelope', async () => {
   const result = await handleMcpMessage({
     jsonrpc: '2.0',
