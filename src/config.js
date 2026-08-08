@@ -55,6 +55,7 @@ export function loadConfig() {
       continuityDays: number('MEMORY_V1_CONTINUITY_DAYS', 30, 1, 365),
       dedupeTtlMinutes: number('MEMORY_V1_DEDUPE_TTL_MINUTES', 30, 1, 1440),
       shadowContextEnabled: bool('MEMORY_V1_SHADOW_CONTEXT_ENABLED', false),
+      contextEnabled: bool('MEMORY_V1_CONTEXT_ENABLED', false),
       shadowContextMaxTokens: number('MEMORY_V1_SHADOW_CONTEXT_MAX_TOKENS', 2200, 200, 4000),
       shadowContextMemoryMaxTokens: number('MEMORY_V1_SHADOW_CONTEXT_MEMORY_MAX_TOKENS', 120, 40, 600),
       shadowContextMemoryMaxRatio: number('MEMORY_V1_SHADOW_CONTEXT_MEMORY_MAX_RATIO', 0.5, 0.05, 0.6),

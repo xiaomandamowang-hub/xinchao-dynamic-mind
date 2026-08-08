@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   composeShadowContextCandidate,
+  promoteShadowContextCandidate,
   ShadowContextCompositionRunner,
 } from '../src/shadow-context-composer.js';
 
@@ -309,4 +310,42 @@ test('same session reads once and runtime diagnostics contain no Memory body or 
   ]);
   const serialized = JSON.stringify(first.diagnostic);
   assert.doesNotMatch(serialized, /mem_private|private summary|query|content|provenance/);
+});
+
+test('formal promotion returns gated Memory in order and strips shadow-only fields', () => {
+  const base = baseEnvelope({ handoff: 'continue memory adapter project' });
+  const composition = composeShadowContextCandidate({
+    baseEnvelope: base,
+    continuityMaterial: material('recent_continuity', [
+      fragment('mem_formal', 'memory adapter project continuity'),
+    ]),
+    topicHint: 'memory adapter project',
+    maxTokens: 200,
+  });
+  const formal = promoteShadowContextCandidate(base, composition);
+  assert.deepEqual(formal.sections.map((section) => section.id), [
+    'dynamic_state',
+    'handoff_notes',
+    'recent_continuity',
+    'dream_residue',
+  ]);
+  assert.equal(formal.delivered, true);
+  assert.equal('shadow' in formal, false);
+  assert.equal('returnedToClient' in formal, false);
+  assert.equal('fallbackToFormal' in formal, false);
+  assert.ok(formal.estimatedTokens <= 200);
+});
+
+test('formal promotion preserves an exact base envelope when gate selects nothing or Memory fails', () => {
+  const base = baseEnvelope();
+  const empty = composeShadowContextCandidate({
+    baseEnvelope: base,
+    continuityMaterial: material('recent_continuity', []),
+  });
+  assert.deepEqual(promoteShadowContextCandidate(base, empty), base);
+  const failed = {
+    candidate: { ...structuredClone(base), fallbackToFormal: true },
+    diagnostic: { memoryReferenceCount: 0 },
+  };
+  assert.deepEqual(promoteShadowContextCandidate(base, failed), base);
 });

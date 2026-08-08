@@ -7,7 +7,7 @@ import { StateStore } from './state-store.js';
 import { ModelClient } from './model-client.js';
 import { OmbreClient } from './ombre-client.js';
 import { MemoryV1Client, MemoryV1ShadowObserver } from './memory-client.js';
-import { ShadowContextCompositionRunner } from './shadow-context-composer.js';
+import { promoteShadowContextCandidate, ShadowContextCompositionRunner } from './shadow-context-composer.js';
 import { BarkClient } from './bark-client.js';
 import { readOmbreHeartbeat } from './heartbeat-store.js';
 import { buildContextEnvelope, contextDeliveryState, recordContextDelivery } from './context-envelope.js';
@@ -58,13 +58,15 @@ async function observeMemoryV1(kind, options = {}) {
   });
 }
 
-async function composeMemoryV1ShadowContext(baseEnvelope, { sessionId, now }) {
+async function composeMemoryV1Context(baseEnvelope, { sessionId, now, maxTokens, formal = false }) {
   const result = await shadowContextComposition.compose({
     baseEnvelope,
     sessionId,
     now,
+    maxTokens,
   });
-  log('memory_v1_shadow_context_composed', result.diagnostic);
+  log(formal ? 'memory_v1_context_composed' : 'memory_v1_shadow_context_composed', result.diagnostic);
+  return result;
 }
 
 async function updateState(meta, mutate) {
@@ -421,7 +423,7 @@ async function createContextEnvelope({
       log('context_ombre_read_failed', { message: error.message });
     }
   }
-  const envelope = buildContextEnvelope({
+  const baseEnvelope = buildContextEnvelope({
     state,
     sessionId,
     mode,
@@ -432,9 +434,18 @@ async function createContextEnvelope({
     alreadyDelivered: delivery.alreadyDelivered,
     force,
   });
-  if (envelope.delivered && mode === 'session_start') {
-    if (config.memoryV1.enabled && config.memoryV1.shadowEnabled && config.memoryV1.shadowContextEnabled) {
-      void composeMemoryV1ShadowContext(envelope, { sessionId, now });
+  let envelope = baseEnvelope;
+  if (baseEnvelope.delivered && mode === 'session_start') {
+    if (config.memoryV1.enabled && config.memoryV1.contextEnabled) {
+      const composition = await composeMemoryV1Context(baseEnvelope, {
+        sessionId,
+        now,
+        maxTokens,
+        formal: true,
+      });
+      envelope = promoteShadowContextCandidate(baseEnvelope, composition);
+    } else if (config.memoryV1.enabled && config.memoryV1.shadowEnabled && config.memoryV1.shadowContextEnabled) {
+      void composeMemoryV1Context(baseEnvelope, { sessionId, now, maxTokens });
     } else {
       void observeMemoryV1('recentContinuityMaterial', {
         dedupeKey: `context:${sessionId}`,

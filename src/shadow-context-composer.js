@@ -4,6 +4,13 @@ import { estimateTokens, trimToTokenBudget } from './context-envelope.js';
 const BASE_SECTION_IDS = new Set(['dynamic_state', 'handoff_notes', 'dream_residue']);
 const ALLOWED_MEMORY_STATUSES = new Set(['active', 'contested']);
 const STABLE_MEMORY_TYPES = new Set(['core', 'preferences', 'relationship']);
+const SECTION_LABELS = Object.freeze({
+  dynamic_state: '心潮动态状态',
+  handoff_notes: '近期交接便签（非原文）',
+  recent_continuity: '近期连续性（不替代基岩）',
+  recent_material: '当前话题相关记忆（只读）',
+  dream_residue: '梦境余韵',
+});
 const GENERIC_TOPIC_UNITS = new Set([
   '今天', '昨天', '最近', '当前', '继续', '关于', '相关', '事情', '记忆', '系统',
   '项目', '讨论', '关系', '没有', '正在', '什么', '哪些', '我们', '聊天',
@@ -12,6 +19,10 @@ const GENERIC_TOPIC_UNITS = new Set([
 
 function compact(value) {
   return String(value ?? '').replace(/\s+/g, ' ').trim();
+}
+
+function renderedSection(section) {
+  return `[${SECTION_LABELS[section.id] ?? section.id}]\n${section.content}`;
 }
 
 function normalizedContent(value) {
@@ -350,7 +361,7 @@ export function composeShadowContextCandidate({
     .filter((section) => BASE_SECTION_IDS.has(section.id))
     .map((section) => structuredClone(section));
   const baseTokens = baseSections.reduce((sum, section) => (
-    sum + estimateTokens(`[${section.id}]\n${section.content}`)
+    sum + estimateTokens(renderedSection(section))
   ), 0) + Math.max(0, baseSections.length - 1) * 2;
   const remaining = Math.max(0, tokenBudget - baseTokens);
   const absoluteMemoryLimit = Math.max(40, Math.min(600, Number(memoryMaxTokens) || 120));
@@ -370,8 +381,8 @@ export function composeShadowContextCandidate({
   const continuity = audit.selected.filter((item) => item.origin === 'recent_continuity');
   const recent = audit.selected.filter((item) => item.origin === 'recent_material');
   const potentialMemorySections = Number(continuity.length > 0) + Number(recent.length > 0);
-  const memoryRenderReserve = (continuity.length ? estimateTokens('[recent_continuity]\n') : 0)
-    + (recent.length ? estimateTokens('[recent_material]\n') : 0)
+  const memoryRenderReserve = (continuity.length ? estimateTokens(`[${SECTION_LABELS.recent_continuity}]\n`) : 0)
+    + (recent.length ? estimateTokens(`[${SECTION_LABELS.recent_material}]\n`) : 0)
     + potentialMemorySections * 2;
   const memoryContentBudget = Math.max(0, memoryBudget - memoryRenderReserve);
   const continuityBudget = recent.length ? Math.floor(memoryContentBudget * 0.7) : memoryContentBudget;
@@ -386,7 +397,7 @@ export function composeShadowContextCandidate({
       source: 'memory-v1-shadow',
       ttl: 'session-start',
       content: renderedContinuity.text,
-      estimatedTokens: estimateTokens(`[recent_continuity]\n${renderedContinuity.text}`),
+      estimatedTokens: estimateTokens(`[${SECTION_LABELS.recent_continuity}]\n${renderedContinuity.text}`),
     });
   }
   if (renderedRecent.text) {
@@ -395,7 +406,7 @@ export function composeShadowContextCandidate({
       source: 'memory-v1-shadow',
       ttl: 'session-start',
       content: renderedRecent.text,
-      estimatedTokens: estimateTokens(`[recent_material]\n${renderedRecent.text}`),
+      estimatedTokens: estimateTokens(`[${SECTION_LABELS.recent_material}]\n${renderedRecent.text}`),
     });
   }
 
@@ -441,7 +452,7 @@ export function composeShadowContextCandidate({
   const beforeDream = baseSections.filter((section) => section.id !== 'dream_residue');
   const dreams = baseSections.filter((section) => section.id === 'dream_residue');
   const sections = [...beforeDream, ...memorySections, ...dreams];
-  const additionalContext = sections.map((section) => `[${section.id}]\n${section.content}`).join('\n\n');
+  const additionalContext = sections.map(renderedSection).join('\n\n');
   const totalTokens = estimateTokens(additionalContext);
   const digest = createHash('sha256').update(additionalContext, 'utf8').digest('hex').slice(0, 16);
   const renderedMemory = [...renderedContinuity.rendered, ...renderedRecent.rendered];
@@ -458,7 +469,7 @@ export function composeShadowContextCandidate({
 
   const sectionTokens = Object.fromEntries(sections.map((section) => [
     section.id,
-    estimateTokens(`[${section.id}]\n${section.content}`),
+    estimateTokens(renderedSection(section)),
   ]));
   const memoryTokens = (sectionTokens.recent_continuity ?? 0) + (sectionTokens.recent_material ?? 0);
   return {
@@ -515,6 +526,22 @@ export function composeShadowContextCandidate({
   };
 }
 
+export function promoteShadowContextCandidate(baseEnvelope, composition) {
+  if (
+    composition.candidate.fallbackToFormal
+    || composition.diagnostic.memoryReferenceCount === 0
+  ) return structuredClone(baseEnvelope);
+  const promoted = {
+    ...structuredClone(composition.candidate),
+    delivered: baseEnvelope.delivered,
+    alreadyDelivered: baseEnvelope.alreadyDelivered,
+  };
+  delete promoted.shadow;
+  delete promoted.returnedToClient;
+  delete promoted.fallbackToFormal;
+  return promoted;
+}
+
 function failureCode(error) {
   const message = String(error?.message ?? '').toLowerCase();
   if (message.includes('timeout') || error?.name === 'TimeoutError') return 'memory_timeout';
@@ -542,7 +569,7 @@ export class ShadowContextCompositionRunner {
     this.deliveries = new Map();
   }
 
-  async compose({ baseEnvelope, sessionId, now = new Date(), topicHint = '' }) {
+  async compose({ baseEnvelope, sessionId, now = new Date(), topicHint = '', maxTokens }) {
     const started = performance.now();
     const timestamp = new Date(now).getTime();
     this.#prune(timestamp);
@@ -557,7 +584,7 @@ export class ShadowContextCompositionRunner {
           baseEnvelope,
           continuityMaterial: { fragments: [], provenance: [] },
           recentMaterial: null,
-          maxTokens: this.maxTokens,
+          maxTokens: Math.min(this.maxTokens, Number(maxTokens) || this.maxTokens),
           memoryMaxTokens: this.memoryMaxTokens,
           memoryMaxRatio: this.memoryMaxRatio,
           maxMemoryReferences: this.maxMemoryReferences,
@@ -582,7 +609,7 @@ export class ShadowContextCompositionRunner {
         baseEnvelope,
         continuityMaterial,
         recentMaterial,
-        maxTokens: this.maxTokens,
+        maxTokens: Math.min(this.maxTokens, Number(maxTokens) || this.maxTokens),
         memoryMaxTokens: this.memoryMaxTokens,
         memoryMaxRatio: this.memoryMaxRatio,
         maxMemoryReferences: this.maxMemoryReferences,

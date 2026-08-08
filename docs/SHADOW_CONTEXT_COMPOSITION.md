@@ -55,3 +55,11 @@ Memory.
 Runtime logs contain only section counts, token counts, Memory-reference count,
 digest, latency, and an error code. Memory IDs and safe summaries are written
 only by the explicit private evaluation command to a mode-0600 report.
+
+## Formal return switch
+
+`MEMORY_V1_CONTEXT_ENABLED=true` promotes a successfully composed gated
+Candidate into the formal `xinchao_context` response. A zero-result gate or any
+Memory failure returns the original envelope at the object level. Setting the
+flag to `false` is the immediate rollback; the Phase 2b shadow path remains
+independently controlled by `MEMORY_V1_SHADOW_CONTEXT_ENABLED`.
