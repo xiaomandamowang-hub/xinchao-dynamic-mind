@@ -16,6 +16,12 @@ const client = new MemoryV1Client(config.memoryV1);
 
 const scenarios = [
   {
+    id: 'unscoped-session-start',
+    label: '无 query / 无 handoff 的 session-start',
+    topicHint: '',
+    clearHandoff: true,
+  },
+  {
     id: 'ordinary-chat',
     label: '普通闲聊',
     topicHint: '今天随便聊聊日常心情，没有需要继续的项目',
@@ -135,6 +141,7 @@ for (const definition of scenarios) {
   const runner = new ShadowContextCompositionRunner(scenarioClient, {
     ttlMinutes: config.memoryV1.dedupeTtlMinutes,
     maxTokens: config.memoryV1.shadowContextMaxTokens,
+    memoryMaxTokens: config.memoryV1.shadowContextMemoryMaxTokens,
     memoryMaxRatio: config.memoryV1.shadowContextMemoryMaxRatio,
     maxMemoryReferences: config.memoryV1.shadowContextMaxReferences,
     perMemoryMaxTokens: config.memoryV1.shadowContextPerMemoryMaxTokens,
@@ -167,6 +174,7 @@ const duplicateClient = {
 const duplicateRunner = new ShadowContextCompositionRunner(duplicateClient, {
   ttlMinutes: config.memoryV1.dedupeTtlMinutes,
   maxTokens: config.memoryV1.shadowContextMaxTokens,
+  memoryMaxTokens: config.memoryV1.shadowContextMemoryMaxTokens,
   memoryMaxRatio: config.memoryV1.shadowContextMemoryMaxRatio,
   maxMemoryReferences: config.memoryV1.shadowContextMaxReferences,
   perMemoryMaxTokens: config.memoryV1.shadowContextPerMemoryMaxTokens,
@@ -177,7 +185,7 @@ const duplicateResult = await duplicateRunner.compose({ baseEnvelope: duplicateF
 const report = {
   generatedAt: now.toISOString(),
   system: 'xinchao-dynamic-mind',
-  phase: 'Mind Phase 2 - Context Shadow Composition',
+  phase: 'Mind Phase 2b - Context Memory Gating',
   runtimeDiagnosticsContainBodies: false,
   formalContextChanged: false,
   scenarios: results,
@@ -203,6 +211,9 @@ const markdown = [
     `- Shadow sections: ${item.shadow.sections.join(' -> ')}`,
     `- Tokens: formal ${item.formal.totalTokens}, shadow ${item.shadow.totalTokens}`,
     `- Memory references: ${item.shadow.memoryReferenceCount}`,
+    `- Memory gate: ${item.quality.gate?.kind ?? 'fallback'} (${item.quality.gate?.reason ?? item.quality.errorCode ?? 'none'})`,
+    `- Memory token share: ${Number((item.quality.memoryShareOfUsed ?? 0) * 100).toFixed(1)}%`,
+    `- Memory budget: ${item.quality.memoryBudget ?? 0} tokens (absolute=${item.quality.absoluteMemoryLimit ?? 0}, relative=${item.quality.relativeMemoryLimit ?? 0})`,
     `- Fallback: ${item.shadow.fallbackToFormal ? 'yes' : 'no'}`,
     `- Error: ${item.shadow.errorCode ?? 'none'}`,
     '',
@@ -245,6 +256,9 @@ console.log(JSON.stringify({
     formalTokens: item.formal.totalTokens,
     shadowTokens: item.shadow.totalTokens,
     memoryReferences: item.shadow.memoryReferenceCount,
+    memoryShare: item.quality.memoryShareOfUsed ?? 0,
+    gate: item.quality.gate?.kind ?? 'fallback',
+    gateReason: item.quality.gate?.reason ?? item.quality.errorCode ?? null,
     fallback: item.shadow.fallbackToFormal,
     errorCode: item.shadow.errorCode,
   })),

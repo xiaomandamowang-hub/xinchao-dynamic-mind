@@ -46,6 +46,10 @@ function fragment(id, content, overrides = {}) {
       status: overrides.status ?? 'active',
       review_state: overrides.review_state ?? 'confirmed',
       supersedes: overrides.supersedes ?? [],
+      layer: overrides.layer ?? null,
+      importance: overrides.importance ?? null,
+      salience: overrides.salience ?? null,
+      continuity_signal: overrides.continuity_signal ?? false,
     },
   };
 }
@@ -63,7 +67,7 @@ test('candidate keeps required order, preserves base sections and deduplicates M
   const shared = fragment('mem_shared', 'adapter project boundary and tests');
   const result = composeShadowContextCandidate({
     baseEnvelope: base,
-    continuityMaterial: material('recent_continuity', [shared, fragment('mem_continuity', 'relationship continuity')]),
+    continuityMaterial: material('recent_continuity', [shared]),
     recentMaterial: material('recent_material', [shared, fragment('mem_project', 'phase two project work')]),
     maxTokens: 1000,
     memoryMaxRatio: 0.5,
@@ -94,6 +98,7 @@ test('pending, superseded and historical memories are excluded while contested s
       fragment('mem_contested', 'contested fact', { status: 'contested' }),
     ]),
     maxTokens: 1000,
+    topicHint: 'fact',
   });
   assert.deepEqual(result.audit.selected.map((item) => item.memoryId), ['mem_contested']);
   assert.equal(result.audit.selected[0].reason, 'selected_contested_with_provenance');
@@ -112,6 +117,7 @@ test('newer selected version replaces an older selected version through supersed
       fragment('mem_new', 'new project decision', { supersedes: ['mem_old'] }),
     ]),
     maxTokens: 1000,
+    topicHint: 'project decision',
   });
   assert.deepEqual(result.audit.selected.map((item) => item.memoryId), ['mem_new']);
   assert.equal(result.audit.dropped.some((item) => (
@@ -139,7 +145,13 @@ test('composition is deterministic and never mutates formal context or Memory ma
   ]);
   const beforeBase = structuredClone(base);
   const beforeMemory = structuredClone(continuity);
-  const options = { baseEnvelope: base, continuityMaterial: continuity, maxTokens: 700, memoryMaxRatio: 0.5 };
+  const options = {
+    baseEnvelope: base,
+    continuityMaterial: continuity,
+    maxTokens: 700,
+    memoryMaxRatio: 0.5,
+    topicHint: 'relevant memory',
+  };
   const first = composeShadowContextCandidate(options);
   const second = composeShadowContextCandidate(options);
   assert.equal(first.candidate.digest, second.candidate.digest);
@@ -191,6 +203,84 @@ test('explicit no-recall conversation intent avoids every Memory call', async ()
   assert.equal(reads, 0);
   assert.equal(result.candidate.digest, base.digest);
   assert.equal(result.diagnostic.memoryReferenceCount, 0);
+});
+
+test('unscoped session start does not admit memories merely because they are recent', async () => {
+  let continuityReads = 0;
+  let recentReads = 0;
+  const base = baseEnvelope();
+  const client = {
+    recentContinuityMaterial: async () => {
+      continuityReads += 1;
+      return material('recent_continuity', [
+        fragment('mem_recent_a', 'recent relationship detail'),
+        fragment('mem_recent_b', 'recent project detail'),
+      ]);
+    },
+    recentMaterial: async () => {
+      recentReads += 1;
+      return material('recent_material', []);
+    },
+  };
+  const runner = new ShadowContextCompositionRunner(client);
+  const result = await runner.compose({ baseEnvelope: base, sessionId: 'unscoped' });
+  assert.equal(continuityReads, 1);
+  assert.equal(recentReads, 0);
+  assert.equal(result.diagnostic.memoryReferenceCount, 0);
+  assert.equal(result.audit.gate.kind, 'unscoped_session_start');
+  assert.equal(result.audit.dropped.every((item) => item.reason === 'unscoped_without_salience_signal'), true);
+  assert.equal(result.candidate.additionalContext, base.additionalContext);
+});
+
+test('unscoped session start allows at most one explicitly salient continuity memory', () => {
+  const result = composeShadowContextCandidate({
+    baseEnvelope: baseEnvelope({ longBase: true }),
+    continuityMaterial: material('recent_continuity', [
+      fragment('mem_critical', 'critical continuity', { importance: 'critical' }),
+      fragment('mem_salient', 'salient continuity', { salience: 0.95 }),
+    ]),
+    maxTokens: 1000,
+  });
+  assert.deepEqual(result.audit.selected.map((item) => item.memoryId), ['mem_critical']);
+  assert.equal(result.audit.gate.maxReferences, 1);
+  assert.equal(result.audit.dropped.some((item) => (
+    item.memoryId === 'mem_salient' && item.reason === 'reference_limit'
+  )), true);
+});
+
+test('explicit topic can admit two relevant memories but never a third', () => {
+  const result = composeShadowContextCandidate({
+    baseEnvelope: baseEnvelope({ longBase: true }),
+    continuityMaterial: material('recent_continuity', [
+      fragment('mem_project_a', 'memory adapter project tests'),
+      fragment('mem_project_b', 'memory adapter project deployment'),
+      fragment('mem_project_c', 'memory adapter project report'),
+    ]),
+    topicHint: 'memory adapter project',
+    maxTokens: 1000,
+  });
+  assert.equal(result.audit.selected.length, 2);
+  assert.equal(result.audit.gate.kind, 'explicit_continuity');
+  assert.equal(result.audit.dropped.some((item) => item.reason === 'reference_limit'), true);
+});
+
+test('memory budget is bounded by both absolute and relative caps without trimming base sections', () => {
+  const base = baseEnvelope({ handoff: 'continue memory adapter project', longBase: true });
+  const result = composeShadowContextCandidate({
+    baseEnvelope: base,
+    continuityMaterial: material('recent_continuity', [
+      fragment('mem_budget_a', 'memory adapter project '.repeat(80)),
+      fragment('mem_budget_b', 'memory adapter deployment '.repeat(80)),
+    ]),
+    topicHint: 'memory adapter project',
+    maxTokens: 1000,
+    memoryMaxTokens: 70,
+    memoryMaxRatio: 0.5,
+  });
+  assert.ok(result.audit.memoryBudget <= 70);
+  assert.ok(result.audit.memoryBudget <= result.audit.relativeMemoryLimit);
+  assert.ok(result.audit.memoryTokens <= 70);
+  assert.equal(result.audit.baseSectionsPreserved, true);
 });
 
 test('same session reads once and runtime diagnostics contain no Memory body or IDs', async () => {

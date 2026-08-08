@@ -160,7 +160,41 @@ function privateAuditEntry(fragment, reason, extra = {}) {
   };
 }
 
-function selectMemoryFragments({ continuityMaterial, recentMaterial, baseSections, topicHint, now, maxReferences }) {
+function contextMemoryGate({ baseSections, topicHint, configuredMaxReferences }) {
+  const hasTopic = Boolean(compact(topicHint));
+  const hasHandoff = Boolean(compact(
+    baseSections.find((section) => section.id === 'handoff_notes')?.content,
+  ));
+  if (hasTopic || hasHandoff) {
+    return {
+      kind: 'explicit_continuity',
+      reason: hasTopic && hasHandoff
+        ? 'topic_and_handoff'
+        : hasHandoff ? 'handoff' : 'topic',
+      maxReferences: Math.min(2, configuredMaxReferences),
+    };
+  }
+  return {
+    kind: 'unscoped_session_start',
+    reason: 'no_topic_or_handoff',
+    maxReferences: Math.min(1, configuredMaxReferences),
+  };
+}
+
+function unscopedContinuityReason(fragment) {
+  const provenance = fragment.provenance;
+  const confirmed = compact(provenance.review_state).toLowerCase() === 'confirmed';
+  const active = compact(provenance.status).toLowerCase() === 'active';
+  if (!active || !confirmed) return 'unscoped_not_confirmed_active';
+  const salience = Number(provenance.salience);
+  const explicitlySalient = Number.isFinite(salience) && salience >= 0.8;
+  const critical = compact(provenance.importance).toLowerCase() === 'critical';
+  const coreLayer = compact(provenance.layer).toUpperCase() === 'L1';
+  if (explicitlySalient || critical || coreLayer || provenance.continuity_signal === true) return '';
+  return 'unscoped_without_salience_signal';
+}
+
+function selectMemoryFragments({ continuityMaterial, recentMaterial, baseSections, topicHint, now, gate }) {
   const selected = [];
   const dropped = [];
   const overlaps = [];
@@ -189,6 +223,15 @@ function selectMemoryFragments({ continuityMaterial, recentMaterial, baseSection
       dropped.push(privateAuditEntry(fragment, statusReason));
       seenIds.add(id);
       continue;
+    }
+
+    if (gate.kind === 'unscoped_session_start') {
+      const gateReason = unscopedContinuityReason(fragment);
+      if (gateReason) {
+        dropped.push(privateAuditEntry(fragment, gateReason));
+        seenIds.add(id);
+        continue;
+      }
     }
 
     const supersedes = new Set(fragment.provenance.supersedes ?? []);
@@ -261,7 +304,7 @@ function selectMemoryFragments({ continuityMaterial, recentMaterial, baseSection
     seenIds.add(id);
   }
 
-  while (selected.length > maxReferences) {
+  while (selected.length > gate.maxReferences) {
     const removed = selected.pop();
     dropped.push(privateAuditEntry(removed, 'reference_limit'));
   }
@@ -295,6 +338,7 @@ export function composeShadowContextCandidate({
   continuityMaterial,
   recentMaterial = null,
   maxTokens = 2200,
+  memoryMaxTokens = 120,
   memoryMaxRatio = 0.5,
   maxMemoryReferences = 3,
   perMemoryMaxTokens = 55,
@@ -309,16 +353,19 @@ export function composeShadowContextCandidate({
     sum + estimateTokens(`[${section.id}]\n${section.content}`)
   ), 0) + Math.max(0, baseSections.length - 1) * 2;
   const remaining = Math.max(0, tokenBudget - baseTokens);
+  const absoluteMemoryLimit = Math.max(40, Math.min(600, Number(memoryMaxTokens) || 120));
   const shareLimit = Math.max(0.05, Math.min(0.6, memoryMaxRatio));
   const memoryShareBudget = Math.floor(baseTokens * shareLimit / (1 - shareLimit));
-  const memoryBudget = Math.max(0, Math.min(remaining, memoryShareBudget));
+  const memoryBudget = Math.max(0, Math.min(remaining, memoryShareBudget, absoluteMemoryLimit));
+  const configuredMaxReferences = Math.max(1, Math.min(8, Number(maxMemoryReferences) || 3));
+  const gate = contextMemoryGate({ baseSections, topicHint, configuredMaxReferences });
   const audit = selectMemoryFragments({
     continuityMaterial,
     recentMaterial,
     baseSections,
     topicHint,
     now,
-    maxReferences: Math.max(1, Math.min(8, Number(maxMemoryReferences) || 3)),
+    gate,
   });
   const continuity = audit.selected.filter((item) => item.origin === 'recent_continuity');
   const recent = audit.selected.filter((item) => item.origin === 'recent_material');
@@ -384,6 +431,9 @@ export function composeShadowContextCandidate({
         memoryShareOfBudget: 0,
         memoryShareOfUsed: 0,
         fallbackToFormal: false,
+        gate,
+        absoluteMemoryLimit,
+        relativeMemoryLimit: memoryShareBudget,
       },
     };
   }
@@ -458,6 +508,9 @@ export function composeShadowContextCandidate({
       memoryShareOfBudget: Number((memoryTokens / tokenBudget).toFixed(4)),
       memoryShareOfUsed: totalTokens ? Number((memoryTokens / totalTokens).toFixed(4)) : 0,
       fallbackToFormal: false,
+      gate,
+      absoluteMemoryLimit,
+      relativeMemoryLimit: memoryShareBudget,
     },
   };
 }
@@ -473,6 +526,7 @@ export class ShadowContextCompositionRunner {
     ttlMinutes = 30,
     maxEntries = 256,
     maxTokens = 2200,
+    memoryMaxTokens = 120,
     memoryMaxRatio = 0.5,
     maxMemoryReferences = 3,
     perMemoryMaxTokens = 55,
@@ -481,6 +535,7 @@ export class ShadowContextCompositionRunner {
     this.ttlMs = Math.max(1, Number(ttlMinutes) || 30) * 60_000;
     this.maxEntries = Math.max(8, Number(maxEntries) || 256);
     this.maxTokens = maxTokens;
+    this.memoryMaxTokens = memoryMaxTokens;
     this.memoryMaxRatio = memoryMaxRatio;
     this.maxMemoryReferences = maxMemoryReferences;
     this.perMemoryMaxTokens = perMemoryMaxTokens;
@@ -503,6 +558,7 @@ export class ShadowContextCompositionRunner {
           continuityMaterial: { fragments: [], provenance: [] },
           recentMaterial: null,
           maxTokens: this.maxTokens,
+          memoryMaxTokens: this.memoryMaxTokens,
           memoryMaxRatio: this.memoryMaxRatio,
           maxMemoryReferences: this.maxMemoryReferences,
           perMemoryMaxTokens: this.perMemoryMaxTokens,
@@ -518,8 +574,7 @@ export class ShadowContextCompositionRunner {
       const effectiveTopicHint = compact(topicHint) || compact(handoffText);
       const hasHandoff = Boolean(compact(handoffText));
       const needsRecentMaterial = Boolean(effectiveTopicHint)
-        || hasHandoff
-        || continuityMaterial.provenance.length < 2;
+        || hasHandoff;
       const recentMaterial = needsRecentMaterial
         ? await this.client.recentMaterial({ query: effectiveTopicHint || undefined })
         : null;
@@ -528,6 +583,7 @@ export class ShadowContextCompositionRunner {
         continuityMaterial,
         recentMaterial,
         maxTokens: this.maxTokens,
+        memoryMaxTokens: this.memoryMaxTokens,
         memoryMaxRatio: this.memoryMaxRatio,
         maxMemoryReferences: this.maxMemoryReferences,
         perMemoryMaxTokens: this.perMemoryMaxTokens,

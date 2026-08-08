@@ -9,7 +9,7 @@ delivery lifecycle remain unchanged.
 1. `dynamic_state`
 2. active `handoff_notes`
 3. `recent_continuity`
-4. `recent_material` when a topic hint, handoff, or continuity gap justifies it
+4. `recent_material` when a topic hint or handoff justifies it
 5. `dream_residue`
 
 Formal Xinchao sections are budgeted first and copied without modification.
@@ -18,6 +18,28 @@ live Context already present, and each Candidate also has deterministic limits
 for total Memory references and tokens per Memory. This prevents a small live
 Context from being overwhelmed merely because the configured global budget is
 large.
+
+## Phase 2b memory gate
+
+Memory admission is decided after read-only retrieval and before rendering. It
+does not alter the Memory backend or its ranking:
+
+- A topic hint or an effective handoff is an explicit continuity signal. At
+  most two relevant memories may be admitted.
+- A session start with neither topic nor handoff is unscoped. It admits at most
+  one memory, and only when the record is confirmed and active plus carries an
+  explicit continuity signal in its existing provenance: `salience >= 0.8`,
+  `importance=critical`, `layer=L1`, or `continuity_signal=true`.
+- Recency alone never opens the unscoped gate. If the Memory response does not
+  expose an explicit signal, the safe result is zero memories.
+- An unscoped session never performs the generic `recentMaterial` search. It
+  only examines the already bounded continuity material.
+
+The rendered Memory allocation is the minimum of the remaining total-context
+budget, the relative Memory share cap, and
+`MEMORY_V1_SHADOW_CONTEXT_MEMORY_MAX_TOKENS`. Existing dynamic state, handoff,
+and dream residue are copied first and are never trimmed to make room for
+Memory.
 
 ## Memory policy
 

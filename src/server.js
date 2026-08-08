@@ -29,6 +29,7 @@ const memoryV1Shadow = new MemoryV1ShadowObserver(memoryV1, {
 const shadowContextComposition = new ShadowContextCompositionRunner(memoryV1, {
   ttlMinutes: config.memoryV1.dedupeTtlMinutes,
   maxTokens: config.memoryV1.shadowContextMaxTokens,
+  memoryMaxTokens: config.memoryV1.shadowContextMemoryMaxTokens,
   memoryMaxRatio: config.memoryV1.shadowContextMemoryMaxRatio,
   maxMemoryReferences: config.memoryV1.shadowContextMaxReferences,
   perMemoryMaxTokens: config.memoryV1.shadowContextPerMemoryMaxTokens,
