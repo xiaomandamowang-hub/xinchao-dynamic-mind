@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
-import { loadConfig, validateConfig } from './config.js';
+import { loadConfig, validateConfig, validateServiceToken } from './config.js';
 import { applyDriveFeedback, applyOmbreHeartbeat, barkAllowed, breathDreamContext, contactIdleAllowed, daytimeEmergenceAllowed, dreamAllowed, newState, pickIntent, proactiveBarkAllowed, recordBark, recordDaytimeEmergence, recordDream, scheduleDaytimeEmergence, settleAndApplyConversationEvent, settleState, topDrives } from './engine.js';
 import { selectUniqueBark } from './bark-dedupe.js';
 import { StateStore } from './state-store.js';
@@ -15,9 +15,10 @@ import { TransitionJournal } from './transition-journal.js';
 import { handleMcpMessage } from './mcp-protocol.js';
 import { OAuthProvider } from './oauth-provider.js';
 import { recordHandoffNote } from './handoff-notes.js';
+import { SYSTEM_VERSION } from './version.js';
 
 const config = validateConfig(loadConfig());
-if (!config.serviceToken) throw new Error('SERVICE_TOKEN is required');
+validateServiceToken(config.serviceToken);
 
 const store = new StateStore(config.statePath, () => newState());
 const model = new ModelClient(config.model);
@@ -570,7 +571,7 @@ const server = createServer(async (request, response) => {
         ok: true,
         system: 'xinchao-dynamic-mind',
         mode: config.shadowMode ? 'shadow' : 'active',
-        version: '2.3.2',
+        version: SYSTEM_VERSION,
       });
     }
     if (await oauth.handle(request, response, url)) return;

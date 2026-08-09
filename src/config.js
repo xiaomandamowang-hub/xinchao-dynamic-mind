@@ -154,3 +154,17 @@ export function validateConfig(config) {
   }
   return config;
 }
+
+export function validateServiceToken(value) {
+  const token = String(value ?? '');
+  if (!token) throw new Error('SERVICE_TOKEN is required');
+  if (/^replace-with/i.test(token)) {
+    throw new Error(
+      'SERVICE_TOKEN is still the placeholder from .env.example — generate a real one: openssl rand -hex 32',
+    );
+  }
+  if (token.length < 32) {
+    throw new Error('SERVICE_TOKEN must be at least 32 characters — generate one: openssl rand -hex 32');
+  }
+  return token;
+}

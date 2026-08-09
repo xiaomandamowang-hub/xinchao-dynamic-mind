@@ -2,6 +2,15 @@
 
 本项目遵循语义化版本。除非特别说明，所有外部模型、长期记忆、OAuth 与通知能力均保持默认关闭。
 
+## 2.3.4 — 2026-08-09
+
+### 安全与兼容性预检
+
+- 启动时拒绝 `.env.example` 的 `SERVICE_TOKEN` 占位值及不足 32 字符的弱 token。
+- package、health、MCP serverInfo 和内部 Ombre clientInfo 共用同一版本常量。
+- drive 数量测试改为跟随 `DRIVE_KEYS.length`，不再依赖固定维度数量。
+- 本版本不引入 upstream 2.5 recall、Dashboard、Runtime Bridge 或任何 Mind v2 运行能力。
+
 ## 2.3.3 — 2026-07-31
 
 ### 外部记忆兼容

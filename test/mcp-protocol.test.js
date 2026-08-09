@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { handleMcpMessage } from '../src/mcp-protocol.js';
+import { SYSTEM_VERSION } from '../src/version.js';
 
 function handlers() {
   return {
@@ -31,7 +32,7 @@ function handlers() {
   };
 }
 
-test('MCP initialize advertises the 2.3.2 tool server', async () => {
+test('MCP initialize advertises the package-aligned tool server version', async () => {
   const result = await handleMcpMessage({
     jsonrpc: '2.0',
     id: 1,
@@ -41,7 +42,7 @@ test('MCP initialize advertises the 2.3.2 tool server', async () => {
   assert.equal(result.status, 200);
   assert.equal(result.body.result.protocolVersion, '2025-06-18');
   assert.equal(result.body.result.serverInfo.name, 'xinchao-dynamic-mind');
-  assert.equal(result.body.result.serverInfo.version, '2.3.2');
+  assert.equal(result.body.result.serverInfo.version, SYSTEM_VERSION);
   assert.equal(result.body.result.capabilities.tools.listChanged, false);
 });
 

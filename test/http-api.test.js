@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import { SYSTEM_VERSION } from '../src/version.js';
 
 const projectDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const serverPath = join(projectDir, 'src', 'server.js');
@@ -37,10 +38,29 @@ async function waitForHealth(baseUrl, child, output) {
   throw new Error(`等待心潮测试服务启动超时：${output.value}`);
 }
 
+for (const [label, token, pattern] of [
+  ['placeholder', 'replace-with-a-random-secret', /still the placeholder/],
+  ['short', 'short-service-token', /at least 32 characters/],
+]) {
+  test(`server refuses a ${label} SERVICE_TOKEN before startup`, async () => {
+    const child = spawn(process.execPath, [serverPath], {
+      cwd: projectDir,
+      env: { ...process.env, SERVICE_TOKEN: token },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let output = '';
+    child.stdout.on('data', (chunk) => { output += chunk; });
+    child.stderr.on('data', (chunk) => { output += chunk; });
+    const [code] = await once(child, 'exit');
+    assert.notEqual(code, 0);
+    assert.match(output, pattern);
+  });
+}
+
 test('POST /v1/handoff-note stores a bounded idempotent note for HTTP clients', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'xinchao-http-api-'));
   const port = await freePort();
-  const token = 'http-api-test-token';
+  const token = 'http-api-test-token-0123456789abcdef';
   const baseUrl = `http://127.0.0.1:${port}`;
   const output = { value: '' };
   const child = spawn(process.execPath, [serverPath], {
@@ -76,6 +96,8 @@ test('POST /v1/handoff-note stores a bounded idempotent note for HTTP clients', 
   });
 
   await waitForHealth(baseUrl, child, output);
+  const health = await fetch(`${baseUrl}/health`);
+  assert.equal((await health.json()).version, SYSTEM_VERSION);
   const note = 'HTTP 客户端的近期进度';
 
   const heartbeat = await fetch(`${baseUrl}/v1/heartbeat`, {

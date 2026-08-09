@@ -1,7 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { DIMENSIONS, DRIVE_KEYS } from '../src/dimensions.js';
 import { activeSessionOverlay, applyConversationEvent, applyDriveFeedback, applyOmbreHeartbeat, barkAllowed, barkDuplicateCheck, barkMessageSimilarity, breathDreamContext, contactIdleAllowed, daytimeEmergenceAllowed, dreamAllowed, newState, proactiveBarkAllowed, recentBarkHistory, recordBark, recordDaytimeEmergence, recordDream, scheduleDaytimeEmergence, settleAndApplyConversationEvent, settleState } from '../src/engine.js';
-import { DIMENSIONS } from '../src/dimensions.js';
+
+test('new state follows the drive registry instead of a fixed drive count', () => {
+  assert.equal(Object.keys(newState().drives).length, DRIVE_KEYS.length);
+  assert.deepEqual(Object.keys(newState().drives), [...DRIVE_KEYS]);
+});
 
 test('idle time enters sleep and repeated settlement is idempotent at same instant', () => {
   const start = new Date('2026-07-16T00:00:00Z');

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { validateConfig } from '../src/config.js';
+import { validateConfig, validateServiceToken } from '../src/config.js';
 
 
 function config(overrides = {}) {
@@ -75,4 +75,18 @@ test('Memory V1 remains optional and requires only an endpoint when enabled', ()
     memoryV1: { enabled: true, url: 'http://127.0.0.1:18120/mcp' },
   });
   assert.equal(validateConfig(value), value);
+});
+
+test('SERVICE_TOKEN startup validation rejects missing, placeholder and short values', () => {
+  assert.throws(() => validateServiceToken(''), /SERVICE_TOKEN is required/);
+  assert.throws(
+    () => validateServiceToken('replace-with-a-random-secret'),
+    /still the placeholder/,
+  );
+  assert.throws(() => validateServiceToken('too-short'), /at least 32 characters/);
+});
+
+test('SERVICE_TOKEN startup validation accepts a strong non-placeholder value', () => {
+  const token = '0123456789abcdef0123456789abcdef';
+  assert.equal(validateServiceToken(token), token);
 });
