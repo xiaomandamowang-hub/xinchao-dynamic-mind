@@ -220,3 +220,85 @@ test('initialized notification uses an empty 202 response', async () => {
   assert.equal(result.status, 202);
   assert.equal(result.body, null);
 });
+
+test('Appraisal tool is feature-gated and exposes no drive or free-TTL input', async () => {
+  const enabledHandlers = {
+    ...handlers(),
+    appraisal: async (operation) => ({
+      revision: 3,
+      action: operation.action,
+      duplicate: false,
+      appraisal: { id: 'appraisal-1', status: 'active', version: 1 },
+      received: operation,
+    }),
+  };
+  const listed = await handleMcpMessage({
+    jsonrpc: '2.0', id: 30, method: 'tools/list',
+  }, enabledHandlers);
+  const tool = listed.body.result.tools.find((item) => item.name === 'xinchao_appraisal');
+  assert.ok(tool);
+  assert.equal(tool.annotations.idempotentHint, true);
+  assert.deepEqual(tool.inputSchema.properties.persistence_class.enum, [
+    'fleeting', 'situational', 'significant',
+  ]);
+  assert.equal('drive_delta' in tool.inputSchema.properties, false);
+  assert.equal('ttl' in tool.inputSchema.properties, false);
+  assert.equal('ttl_hours' in tool.inputSchema.properties, false);
+  assert.deepEqual(tool.inputSchema.required, [
+    'action', 'operation_id', 'source_event_id', 'subject_key',
+  ]);
+  assert.ok(tool.inputSchema.allOf[0].then.required.includes('interpretation'));
+  assert.ok(tool.inputSchema.allOf[0].then.required.includes('persistence_class'));
+
+  const initialized = await handleMcpMessage({
+    jsonrpc: '2.0', id: 31, method: 'initialize', params: { protocolVersion: '2025-06-18' },
+  }, enabledHandlers);
+  assert.match(initialized.body.result.instructions, /not Memory fact/);
+});
+
+test('xinchao_appraisal passes only its bounded semantic contract', async () => {
+  let received;
+  const result = await handleMcpMessage({
+    jsonrpc: '2.0',
+    id: 32,
+    method: 'tools/call',
+    params: {
+      name: 'xinchao_appraisal',
+      arguments: {
+        action: 'create',
+        operation_id: 'appraisal-operation-1',
+        source_event_id: 'real-event-1',
+        subject_key: 'relationship:trust',
+        interpretation: 'The interaction currently feels reparative.',
+        valence: 0.4,
+        relevance: 0.8,
+        certainty: 0.6,
+        controllability: 0.3,
+        relational_meaning: 'Trust may be returning.',
+        persistence_class: 'situational',
+        drive_delta: { anger: -1 },
+        chat_plaintext: 'must not pass',
+        ttl_hours: 999,
+      },
+    },
+  }, {
+    ...handlers(),
+    appraisal: async (operation) => {
+      received = operation;
+      return {
+        revision: 3,
+        action: operation.action,
+        duplicate: false,
+        appraisal: { id: 'appraisal-1', status: 'active', version: 1 },
+      };
+    },
+  });
+  assert.equal(result.body.result.isError, false);
+  assert.equal(received.operationId, 'appraisal-operation-1');
+  assert.equal(received.sourceEventId, 'real-event-1');
+  assert.equal(received.relationalMeaning, 'Trust may be returning.');
+  assert.equal('drive_delta' in received, false);
+  assert.equal('chat_plaintext' in received, false);
+  assert.equal('ttl_hours' in received, false);
+  assert.doesNotMatch(result.body.result.content[0].text, /reparative|Trust may be returning/);
+});

@@ -105,7 +105,9 @@ export class MindV2Store {
         throw new MindV2StateError(result.errorCode ?? 'mind_v2_store_disabled');
       }
       const next = await mutator(structuredClone(result.state));
-      await this.write(next);
+      if (JSON.stringify(next) !== JSON.stringify(result.state)) {
+        await this.write(next);
+      }
       return next;
     });
     this.#queue = operation.catch(() => {});

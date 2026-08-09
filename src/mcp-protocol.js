@@ -175,12 +175,64 @@ export const XINCHAO_TOOLS = [
   },
 ];
 
+const APPRAISAL_TOOL = {
+  name: 'xinchao_appraisal',
+  title: '更新当前主观评价',
+  description: [
+    '仅在一次真实 xinchao_event 已成功落地、且形成了明确主观理解时调用。',
+    'xinchao_event 描述发生了什么；本工具只描述沈归现在如何理解它。',
+    '不提交聊天原文，不提交 drive 数值。没有形成明确评价时完全不要调用。',
+    'create/revise 需要完整评价字段；release 只结束当前评价。',
+  ].join(''),
+  inputSchema: {
+    type: 'object',
+    properties: {
+      action: { type: 'string', enum: ['create', 'revise', 'release'] },
+      operation_id: { type: 'string', minLength: 1, maxLength: 120 },
+      source_event_id: { type: 'string', minLength: 1, maxLength: 120 },
+      subject_key: { type: 'string', minLength: 1, maxLength: 120 },
+      interpretation: { type: 'string', minLength: 1, maxLength: 480 },
+      valence: { type: 'number', minimum: -1, maximum: 1 },
+      relevance: { type: 'number', minimum: 0, maximum: 1 },
+      certainty: { type: 'number', minimum: 0, maximum: 1 },
+      controllability: { type: 'number', minimum: 0, maximum: 1 },
+      relational_meaning: { type: 'string', maxLength: 240 },
+      persistence_class: {
+        type: 'string',
+        enum: ['fleeting', 'situational', 'significant'],
+      },
+    },
+    required: ['action', 'operation_id', 'source_event_id', 'subject_key'],
+    allOf: [{
+      if: { properties: { action: { enum: ['create', 'revise'] } } },
+      then: {
+        required: [
+          'interpretation',
+          'valence',
+          'relevance',
+          'certainty',
+          'controllability',
+          'persistence_class',
+        ],
+      },
+    }],
+    additionalProperties: false,
+  },
+  annotations: {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+  },
+};
+
 function triggerPolicyEnabled(policy = {}) {
   return policy?.enabled === true;
 }
 
-function toolsForTriggerPolicy(policy = {}) {
+function toolsForTriggerPolicy(policy = {}, appraisalEnabled = false) {
   const tools = structuredClone(XINCHAO_TOOLS);
+  if (appraisalEnabled) tools.push(structuredClone(APPRAISAL_TOOL));
   if (!triggerPolicyEnabled(policy)) return tools;
   const longGapHours = Math.max(1, Math.min(72, Number(policy.contextLongGapHours) || 6));
   const context = tools.find((tool) => tool.name === 'xinchao_context');
@@ -300,6 +352,22 @@ function handoffNoteArgs(args = {}, fallbackSessionId = '') {
   };
 }
 
+function appraisalArgs(args = {}) {
+  return {
+    action: args.action,
+    operationId: args.operation_id,
+    sourceEventId: args.source_event_id,
+    subjectKey: args.subject_key,
+    interpretation: args.interpretation,
+    valence: args.valence,
+    relevance: args.relevance,
+    certainty: args.certainty,
+    controllability: args.controllability,
+    relationalMeaning: args.relational_meaning,
+    persistenceClass: args.persistence_class,
+  };
+}
+
 async function callTool(name, args, handlers) {
   const fallbackSessionId = handlers.defaultSessionId ?? '';
   if (name === 'xinchao_context') {
@@ -325,6 +393,14 @@ async function callTool(name, args, handlers) {
     const duplicate = result.duplicate ? ' duplicate=true' : '';
     return toolText(
       `近期交接便签已接收：revision=${result.revision}${duplicate}`,
+      result,
+    );
+  }
+  if (name === 'xinchao_appraisal' && handlers.appraisal) {
+    const result = await handlers.appraisal(appraisalArgs(args));
+    const duplicate = result.duplicate ? ' duplicate=true' : '';
+    return toolText(
+      `Appraisal operation accepted: action=${result.action} revision=${result.revision}${duplicate}`,
       result,
     );
   }
@@ -359,6 +435,10 @@ export async function handleMcpMessage(payload, handlers) {
           '一次实际互动后可调用 xinchao_event 更新窗口短状态；event_id 必须唯一，重试时复用。',
           '需要换窗续接时可调用 xinchao_handoff_note 保存近期进度摘要；不要提交聊天原文或人物基岩。',
           '只有结果明确的真实互动才填写 interaction_type；不要提交聊天正文或欲望数值。',
+          ...(handlers.appraisal ? [
+            'Only call xinchao_appraisal after a real xinchao_event has landed and a clear subjective evaluation exists.',
+            'Appraisal is revisable current meaning, not Memory fact; never submit chat plaintext or drive values.',
+          ] : []),
           ...triggerInstructions,
         ].join(''),
       }),
@@ -368,7 +448,12 @@ export async function handleMcpMessage(payload, handlers) {
     return { status: 200, body: response(id, {}) };
   }
   if (method === 'tools/list') {
-    return { status: 200, body: response(id, { tools: toolsForTriggerPolicy(handlers.triggerPolicy) }) };
+    return {
+      status: 200,
+      body: response(id, {
+        tools: toolsForTriggerPolicy(handlers.triggerPolicy, Boolean(handlers.appraisal)),
+      }),
+    };
   }
   if (method === 'tools/call') {
     try {

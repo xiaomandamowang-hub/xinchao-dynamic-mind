@@ -159,6 +159,12 @@ export function validateConfig(config) {
   if (config.memoryV1?.enabled && !String(config.memoryV1.url || '').trim()) {
     throw new Error('MEMORY_V1_MCP_URL is required when Memory V1 is enabled');
   }
+  if (config.mindV2?.appraisalsEnabled && !config.mindV2?.storeEnabled) {
+    throw new Error('MIND_V2_STORE_ENABLED is required when Appraisal is enabled');
+  }
+  if (config.mindV2?.openLoopsEnabled || config.mindV2?.resonanceEnabled) {
+    throw new Error('Open Loop and Resonance are not implemented in this release');
+  }
   return config;
 }
 

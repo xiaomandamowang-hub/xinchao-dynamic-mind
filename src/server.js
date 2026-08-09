@@ -17,6 +17,12 @@ import { handleMcpMessage } from './mcp-protocol.js';
 import { OAuthProvider } from './oauth-provider.js';
 import { recordHandoffNote } from './handoff-notes.js';
 import { SYSTEM_VERSION } from './version.js';
+import {
+  applyAppraisalOperation,
+  initializeAppraisalState,
+  registerAppraisalSourceEvent,
+  settleAppraisals,
+} from './appraisal-lifecycle.js';
 
 const config = validateConfig(loadConfig());
 validateServiceToken(config.serviceToken);
@@ -25,6 +31,7 @@ const store = new StateStore(config.statePath, () => newState());
 const mindV2Store = new MindV2Store(config.mindV2.statePath, {
   enabled: config.mindV2.storeEnabled,
 });
+const appraisalEnabled = config.mindV2.storeEnabled && config.mindV2.appraisalsEnabled;
 const model = new ModelClient(config.model);
 const ombre = new OmbreClient(config.ombre);
 const memoryV1 = new MemoryV1Client(config.memoryV1);
@@ -47,6 +54,91 @@ let cyclePromise = null;
 
 function log(event, fields = {}) {
   console.log(JSON.stringify({ at: new Date().toISOString(), event, ...fields }));
+}
+
+function mindV2ErrorCode(error) {
+  const code = String(error?.code ?? error?.message ?? '');
+  return /^(mind_v2_|appraisal_)[a-z0-9_]+$/.test(code)
+    ? code
+    : 'mind_v2_appraisal_failed';
+}
+
+async function registerRealEventForAppraisal(event, source, baseState, now) {
+  if (!appraisalEnabled || !['mcp', 'api'].includes(source)) return;
+  let outcome;
+  try {
+    const persisted = await mindV2Store.update((mindState) => {
+      outcome = registerAppraisalSourceEvent(mindState, {
+        eventId: event.eventId ?? event.event_id,
+        source,
+        baseState,
+        baseRevision: baseState.revision,
+      }, now);
+      return outcome.state;
+    });
+    log('mind_v2_appraisal_source', {
+      status: outcome.duplicate ? 'duplicate' : 'recorded',
+      revision: persisted.revision,
+      errorCode: null,
+    });
+  } catch (error) {
+    log('mind_v2_appraisal_source', {
+      status: 'omitted',
+      errorCode: mindV2ErrorCode(error),
+    });
+  }
+}
+
+async function recordAppraisalOperation(operation, now = new Date()) {
+  if (!appraisalEnabled) throw new Error('appraisal_disabled');
+  let outcome;
+  try {
+    const persisted = await mindV2Store.update((mindState) => {
+      outcome = applyAppraisalOperation(mindState, operation, now);
+      return outcome.state;
+    });
+    log('mind_v2_appraisal_operation', {
+      status: outcome.duplicate ? 'duplicate' : 'applied',
+      action: outcome.action,
+      revision: persisted.revision,
+      appraisalCount: persisted.appraisals.length,
+      errorCode: null,
+    });
+    return {
+      revision: persisted.revision,
+      action: outcome.action,
+      duplicate: outcome.duplicate,
+      appraisal: outcome.projection,
+    };
+  } catch (error) {
+    const code = mindV2ErrorCode(error);
+    log('mind_v2_appraisal_operation', { status: 'rejected', errorCode: code });
+    throw new Error(code);
+  }
+}
+
+async function settleMindV2Appraisals(now = new Date()) {
+  if (!appraisalEnabled) return;
+  let outcome;
+  try {
+    const persisted = await mindV2Store.update((mindState) => {
+      outcome = settleAppraisals(mindState, now);
+      return outcome.state;
+    });
+    if (outcome.changed) {
+      log('mind_v2_appraisal_settled', {
+        status: 'settled',
+        expiredCount: outcome.expired,
+        revision: persisted.revision,
+        errorCode: null,
+      });
+    }
+  } catch (error) {
+    log('mind_v2_appraisal_settled', {
+      status: 'omitted',
+      errorCode: mindV2ErrorCode(error),
+    });
+  }
 }
 
 async function observeMemoryV1(kind, options = {}) {
@@ -325,6 +417,7 @@ async function runCycle() {
       }, (latest) => scheduleDaytimeEmergence(latest, now, config.daytime.minIntervalHours, config.daytime.maxIntervalHours));
       log('daytime_emergence_scheduled', { nextAt: state.nextDaytimeEmergenceAt, revision: state.revision });
     }
+    await settleMindV2Appraisals(now);
     return { state, dreamCreated, barkSent, daytimeSent };
   })().finally(() => { cyclePromise = null; });
   return cyclePromise;
@@ -523,6 +616,7 @@ async function recordConversationEvent(event, source = 'api', now = new Date()) 
     });
     return applied.state;
   });
+  await registerRealEventForAppraisal(event, source, state, now);
   return {
     revision: state.revision,
     consciousness: state.consciousness,
@@ -616,6 +710,9 @@ const server = createServer(async (request, response) => {
           };
         },
         handoffNote: async (note) => saveHandoffNote(note, 'mcp'),
+        appraisal: appraisalEnabled
+          ? async (operation) => recordAppraisalOperation(operation)
+          : undefined,
       });
       if (payload?.method === 'initialize' || payload?.method === 'tools/call') {
         log('mcp_request', {
@@ -703,6 +800,27 @@ server.listen(config.port, '127.0.0.1', async () => {
       digest: result.digest,
       errorCode: result.errorCode,
     });
+    if (appraisalEnabled && result.state) {
+      try {
+        let migration;
+        const migrated = await mindV2Store.update((mindState) => {
+          migration = initializeAppraisalState(mindState, new Date());
+          return migration.state;
+        });
+        log('mind_v2_appraisal_status', {
+          status: migration.changed ? 'migrated' : 'ready',
+          revision: migrated.revision,
+          appraisalCount: migrated.appraisals.length,
+          errorCode: null,
+        });
+        await settleMindV2Appraisals(new Date());
+      } catch (error) {
+        log('mind_v2_appraisal_status', {
+          status: 'omitted',
+          errorCode: mindV2ErrorCode(error),
+        });
+      }
+    }
   }
   log('service_started', { port: config.port, shadow: config.shadowMode, modelEnabled: config.model.enabled, barkEnabled: config.bark.enabled });
 });

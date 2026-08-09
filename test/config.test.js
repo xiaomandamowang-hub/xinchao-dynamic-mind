@@ -21,6 +21,13 @@ function config(overrides = {}) {
       url: '',
       ...(overrides.memoryV1 || {}),
     },
+    mindV2: {
+      storeEnabled: false,
+      appraisalsEnabled: false,
+      openLoopsEnabled: false,
+      resonanceEnabled: false,
+      ...(overrides.mindV2 || {}),
+    },
   };
 }
 
@@ -89,4 +96,26 @@ test('SERVICE_TOKEN startup validation rejects missing, placeholder and short va
 test('SERVICE_TOKEN startup validation accepts a strong non-placeholder value', () => {
   const token = '0123456789abcdef0123456789abcdef';
   assert.equal(validateServiceToken(token), token);
+});
+
+test('Appraisal requires the independent Mind v2 Store', () => {
+  assert.throws(
+    () => validateConfig(config({ mindV2: { appraisalsEnabled: true } })),
+    /MIND_V2_STORE_ENABLED is required/,
+  );
+  const value = config({
+    mindV2: { storeEnabled: true, appraisalsEnabled: true },
+  });
+  assert.equal(validateConfig(value), value);
+});
+
+test('unimplemented Mind v2 child capabilities fail closed', () => {
+  assert.throws(
+    () => validateConfig(config({ mindV2: { storeEnabled: true, openLoopsEnabled: true } })),
+    /not implemented/,
+  );
+  assert.throws(
+    () => validateConfig(config({ mindV2: { storeEnabled: true, resonanceEnabled: true } })),
+    /not implemented/,
+  );
 });
