@@ -23,6 +23,7 @@ export function loadConfig() {
       statePath: process.env.MIND_V2_STATE_PATH ?? '/var/lib/xinchao-chatgpt/mind-v2-state.json',
       appraisalsEnabled: bool('MIND_V2_APPRAISALS_ENABLED', false),
       openLoopsEnabled: bool('MIND_V2_OPEN_LOOPS_ENABLED', false),
+      recallDeliveryReceiptsEnabled: bool('MIND_V2_RECALL_DELIVERY_RECEIPTS_ENABLED', false),
       resonanceEnabled: bool('MIND_V2_RESONANCE_ENABLED', false),
     },
     settleIntervalMinutes: number('SETTLE_INTERVAL_MINUTES', 15, 1, 1440),
@@ -164,6 +165,9 @@ export function validateConfig(config) {
   }
   if (config.mindV2?.openLoopsEnabled && !config.mindV2?.storeEnabled) {
     throw new Error('MIND_V2_STORE_ENABLED is required when Open Loop is enabled');
+  }
+  if (config.mindV2?.recallDeliveryReceiptsEnabled && !config.mindV2?.storeEnabled) {
+    throw new Error('MIND_V2_STORE_ENABLED is required when Recall Delivery Receipt is enabled');
   }
   if (config.mindV2?.resonanceEnabled) {
     throw new Error('Resonance is not implemented in this release');

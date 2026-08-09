@@ -34,6 +34,7 @@ test('first enable creates the empty schema with mode 0600', async (t) => {
     lastSettledAt: now.toISOString(),
     appraisals: [],
     openLoops: [],
+    recallDeliveryReceipts: [],
     resonance: [],
     idempotency: {},
   });

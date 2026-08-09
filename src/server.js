@@ -28,6 +28,12 @@ import {
   initializeOpenLoopState,
   settleOpenLoops,
 } from './open-loop-lifecycle.js';
+import {
+  applyRecallDeliveryDraft,
+  commitRecallDeliveryOnSuccessfulResponse,
+  createRecallDeliveryDraft,
+  initializeRecallDeliveryState,
+} from './recall-delivery-receipt.js';
 
 const config = validateConfig(loadConfig());
 validateServiceToken(config.serviceToken);
@@ -38,6 +44,8 @@ const mindV2Store = new MindV2Store(config.mindV2.statePath, {
 });
 const appraisalEnabled = config.mindV2.storeEnabled && config.mindV2.appraisalsEnabled;
 const openLoopEnabled = config.mindV2.storeEnabled && config.mindV2.openLoopsEnabled;
+const recallDeliveryReceiptsEnabled = config.mindV2.storeEnabled
+  && config.mindV2.recallDeliveryReceiptsEnabled;
 const mindV2SourceReceiptsEnabled = appraisalEnabled || openLoopEnabled;
 const model = new ModelClient(config.model);
 const ombre = new OmbreClient(config.ombre);
@@ -101,6 +109,37 @@ function openLoopErrorCode(error) {
   return /^(mind_v2_|open_loop_)[a-z0-9_]+$/.test(code)
     ? code
     : 'mind_v2_open_loop_failed';
+}
+
+function recallDeliveryErrorCode(error) {
+  const code = String(error?.code ?? error?.message ?? '');
+  return /^(mind_v2_|recall_delivery_)[a-z0-9_]+$/.test(code)
+    ? code
+    : 'recall_delivery_failed';
+}
+
+async function recordRecallDelivery(draft) {
+  if (!recallDeliveryReceiptsEnabled || !draft) return;
+  let outcome;
+  try {
+    const persisted = await mindV2Store.update((mindState) => {
+      outcome = applyRecallDeliveryDraft(mindState, draft);
+      return outcome.state;
+    });
+    log('mind_v2_recall_delivery', {
+      status: outcome.addedCount ? 'recorded' : 'duplicate',
+      receiptCount: outcome.addedCount,
+      duplicateCount: outcome.duplicateCount,
+      revision: persisted.revision,
+      errorCode: null,
+    });
+  } catch (error) {
+    log('mind_v2_recall_delivery', {
+      status: 'omitted',
+      receiptCount: 0,
+      errorCode: recallDeliveryErrorCode(error),
+    });
+  }
 }
 
 async function recordAppraisalOperation(operation, now = new Date()) {
@@ -570,6 +609,8 @@ async function createContextEnvelope({
   maxTokens = config.context.defaultMaxTokens,
   force = false,
   now = new Date(),
+  sourceOperation = '',
+  onRecallDeliveryDraft = null,
 }) {
   let state = await store.read();
   const delivery = contextDeliveryState(state, sessionId, mode, now, config.context.handoffOnceHours);
@@ -609,6 +650,16 @@ async function createContextEnvelope({
         formal: true,
       });
       envelope = promoteShadowContextCandidate(baseEnvelope, composition);
+      if (recallDeliveryReceiptsEnabled && sourceOperation === 'mcp:xinchao_context') {
+        const draft = createRecallDeliveryDraft({
+          composition,
+          sessionId,
+          contextDigest: envelope.digest,
+          deliveredAt: now,
+          sourceOperation,
+        });
+        if (draft && typeof onRecallDeliveryDraft === 'function') onRecallDeliveryDraft(draft);
+      }
     } else if (config.memoryV1.enabled && config.memoryV1.shadowEnabled && config.memoryV1.shadowContextEnabled) {
       void composeMemoryV1Context(baseEnvelope, { sessionId, now, maxTokens });
     } else {
@@ -757,12 +808,17 @@ const server = createServer(async (request, response) => {
       }
       const payload = await body(request);
       const sessionId = transportSessionId(request, payload?.method === 'initialize');
+      let recallDeliveryDraft = null;
       const result = await handleMcpMessage(payload, {
         defaultSessionId: sessionId,
         triggerPolicy: config.chatgptTrigger,
         context: async (args) => {
           if (!config.context.enabled) throw new Error('心潮 Context Envelope 当前未启用');
-          return createContextEnvelope(args);
+          return createContextEnvelope({
+            ...args,
+            sourceOperation: 'mcp:xinchao_context',
+            onRecallDeliveryDraft: (draft) => { recallDeliveryDraft = draft; },
+          });
         },
         event: async (event) => {
           const result = await recordConversationEvent(event, 'mcp');
@@ -791,6 +847,9 @@ const server = createServer(async (request, response) => {
           session: auditEventFingerprint(sessionId),
           status: result.status,
         });
+      }
+      if (recallDeliveryDraft && result.status === 200 && payload?.params?.name === 'xinchao_context') {
+        commitRecallDeliveryOnSuccessfulResponse(response, recallDeliveryDraft, recordRecallDelivery);
       }
       return sendMcp(response, result.status, result.body, {
         'Mcp-Session-Id': sessionId,
@@ -909,6 +968,27 @@ server.listen(config.port, '127.0.0.1', async () => {
         log('mind_v2_open_loop_status', {
           status: 'omitted',
           errorCode: openLoopErrorCode(error),
+        });
+      }
+    }
+    if (recallDeliveryReceiptsEnabled && result.state) {
+      try {
+        let migration;
+        const migrated = await mindV2Store.update((mindState) => {
+          migration = initializeRecallDeliveryState(mindState, new Date());
+          return migration.state;
+        });
+        log('mind_v2_recall_delivery_status', {
+          status: migration.changed ? 'migrated' : 'ready',
+          revision: migrated.revision,
+          receiptCount: migrated.recallDeliveryReceipts.length,
+          errorCode: null,
+        });
+      } catch (error) {
+        log('mind_v2_recall_delivery_status', {
+          status: 'omitted',
+          receiptCount: 0,
+          errorCode: recallDeliveryErrorCode(error),
         });
       }
     }

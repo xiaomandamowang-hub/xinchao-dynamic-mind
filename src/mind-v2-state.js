@@ -23,6 +23,7 @@ export function newMindV2State(now = new Date()) {
     lastSettledAt: isoTimestamp(now),
     appraisals: [],
     openLoops: [],
+    recallDeliveryReceipts: [],
     resonance: [],
     idempotency: {},
   };

@@ -25,6 +25,7 @@ function config(overrides = {}) {
       storeEnabled: false,
       appraisalsEnabled: false,
       openLoopsEnabled: false,
+      recallDeliveryReceiptsEnabled: false,
       resonanceEnabled: false,
       ...(overrides.mindV2 || {}),
     },
@@ -116,6 +117,17 @@ test('Open Loop requires the independent Mind v2 Store', () => {
   );
   const value = config({
     mindV2: { storeEnabled: true, openLoopsEnabled: true },
+  });
+  assert.equal(validateConfig(value), value);
+});
+
+test('Recall Delivery Receipt requires the independent Mind v2 Store', () => {
+  assert.throws(
+    () => validateConfig(config({ mindV2: { recallDeliveryReceiptsEnabled: true } })),
+    /MIND_V2_STORE_ENABLED is required/,
+  );
+  const value = config({
+    mindV2: { storeEnabled: true, recallDeliveryReceiptsEnabled: true },
   });
   assert.equal(validateConfig(value), value);
 });
