@@ -169,8 +169,11 @@ export function validateConfig(config) {
   if (config.mindV2?.recallDeliveryReceiptsEnabled && !config.mindV2?.storeEnabled) {
     throw new Error('MIND_V2_STORE_ENABLED is required when Recall Delivery Receipt is enabled');
   }
-  if (config.mindV2?.resonanceEnabled) {
-    throw new Error('Resonance is not implemented in this release');
+  if (config.mindV2?.resonanceEnabled && !config.mindV2?.storeEnabled) {
+    throw new Error('MIND_V2_STORE_ENABLED is required when Memory Resonance is enabled');
+  }
+  if (config.mindV2?.resonanceEnabled && !config.mindV2?.recallDeliveryReceiptsEnabled) {
+    throw new Error('MIND_V2_RECALL_DELIVERY_RECEIPTS_ENABLED is required when Memory Resonance is enabled');
   }
   return config;
 }

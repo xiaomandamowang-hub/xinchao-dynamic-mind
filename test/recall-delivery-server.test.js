@@ -62,7 +62,7 @@ async function fakeMemory(items, { fail = false } = {}) {
   return { server, calls, url: `http://127.0.0.1:${port}/mcp` };
 }
 
-async function startMind(directory, memoryUrl, { corrupt = false } = {}) {
+async function startMind(directory, memoryUrl, { corrupt = false, resonance = false } = {}) {
   const probe = createServer();
   const port = await listen(probe);
   await close(probe);
@@ -85,7 +85,7 @@ async function startMind(directory, memoryUrl, { corrupt = false } = {}) {
       MIND_V2_APPRAISALS_ENABLED: 'false',
       MIND_V2_OPEN_LOOPS_ENABLED: 'false',
       MIND_V2_RECALL_DELIVERY_RECEIPTS_ENABLED: 'true',
-      MIND_V2_RESONANCE_ENABLED: 'false',
+      MIND_V2_RESONANCE_ENABLED: String(resonance),
       SETTLE_INTERVAL_MINUTES: '1440',
       SHADOW_MODE: 'true',
       MODEL_ENABLED: 'false',
@@ -106,7 +106,9 @@ async function startMind(directory, memoryUrl, { corrupt = false } = {}) {
   child.stdout.on('data', (chunk) => { output.value += chunk; });
   child.stderr.on('data', (chunk) => { output.value += chunk; });
   const baseUrl = `http://127.0.0.1:${port}`;
-  const readyEvent = corrupt ? 'mind_v2_store_status' : 'mind_v2_recall_delivery_status';
+  const readyEvent = corrupt
+    ? 'mind_v2_store_status'
+    : resonance ? 'mind_v2_memory_resonance_status' : 'mind_v2_recall_delivery_status';
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
     if (child.exitCode != null) throw new Error(`test server exited: ${output.value}`);
@@ -145,6 +147,19 @@ async function mcpContext(mind, sessionId) {
   });
 }
 
+async function mcpPing(mind, sessionId) {
+  return fetch(`${mind.baseUrl}/mcp/${mind.pathToken}`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'mcp-session-id': sessionId,
+      connection: 'close',
+    },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'ping', params: {} }),
+    signal: AbortSignal.timeout(3_000),
+  });
+}
+
 async function addHandoff(mind, sessionId) {
   const response = await fetch(`${mind.baseUrl}/v1/handoff-note`, {
     method: 'POST',
@@ -168,6 +183,16 @@ async function waitForReceipts(path, count) {
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(`receipt count did not reach ${count}`);
+}
+
+async function waitForResonance(path, count) {
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline) {
+    const state = JSON.parse(await readFile(path, 'utf8'));
+    if ((state.resonance ?? []).length === count) return state;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`resonance count did not reach ${count}`);
 }
 
 function sha(value) {
@@ -250,6 +275,62 @@ test('Memory failure falls back to Base Context without a false receipt', async 
   const state = JSON.parse(await readFile(join(directory, 'mind-v2-state.json'), 'utf8'));
   assert.equal(state.recallDeliveryReceipts.length, 0);
   assert.doesNotMatch(mind.output.value, /"event":"mind_v2_recall_delivery"/);
+});
+
+test('formal Context receipt activates Resonance only on a later Mind request', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'xinchao-resonance-next-request-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const memoryId = 'resonance-memory-id-canary';
+  const memoryBody = 'resonance memory body canary';
+  const memory = await fakeMemory([{
+    id: memoryId, type: 'project', source: 'git', title: 'Alpha architecture',
+    summary: `alpha architecture ${memoryBody}`, content: `alpha architecture ${memoryBody}`,
+    status: 'active', review_state: 'confirmed', occurred_at: '2026-08-09T00:00:00.000Z',
+  }]);
+  t.after(() => close(memory.server));
+  const mind = await startMind(directory, memory.url, { resonance: true });
+  t.after(() => stopMind(mind.child));
+  await addHandoff(mind, 'resonance-session');
+
+  const contextResponse = await mcpContext(mind, 'resonance-session');
+  assert.equal(contextResponse.status, 200);
+  const contextPayload = await contextResponse.json();
+  assert.equal(contextPayload.result.isError, false);
+  assert.doesNotMatch(JSON.stringify(contextPayload), /resonanceReceipt|effectiveIntensity|repeatCount/);
+
+  const mindPath = join(directory, 'mind-v2-state.json');
+  const afterReceipt = await waitForReceipts(mindPath, 1);
+  assert.deepEqual(afterReceipt.resonance, []);
+  const baseBeforeActivation = await readFile(join(directory, 'state.json'));
+
+  const ping = await mcpPing(mind, 'resonance-session');
+  assert.equal(ping.status, 200);
+  await ping.arrayBuffer();
+  const activated = await waitForResonance(mindPath, 1);
+  assert.equal(activated.resonance[0].memoryId, memoryId);
+  assert.equal(activated.resonance[0].repeatCount, 0);
+  assert.equal(activated.appraisals.length, 0);
+  assert.equal(activated.openLoops.length, 0);
+  assert.equal(sha(await readFile(join(directory, 'state.json'))), sha(baseBeforeActivation));
+  assert.equal(memory.calls.includes('remember'), false);
+  assert.equal(memory.calls.includes('read_evidence'), false);
+  assert.doesNotMatch(mind.output.value, new RegExp(memoryId));
+  assert.doesNotMatch(mind.output.value, new RegExp(memoryBody));
+  assert.match(mind.output.value, /"event":"mind_v2_memory_resonance"/);
+
+  const secondPing = await mcpPing(mind, 'resonance-session');
+  await secondPing.arrayBuffer();
+  const afterDuplicate = JSON.parse(await readFile(mindPath, 'utf8'));
+  assert.equal(afterDuplicate.resonance[0].repeatCount, 0);
+  assert.equal(afterDuplicate.idempotency.resonanceReceiptCursor, 1);
+  assert.equal(afterDuplicate.recallDeliveryReceipts.length, 1);
+
+  await stopMind(mind.child);
+  const restarted = await startMind(directory, memory.url, { resonance: true });
+  t.after(() => stopMind(restarted.child));
+  const recovered = JSON.parse(await readFile(mindPath, 'utf8'));
+  assert.equal(recovered.resonance.length, 1);
+  assert.equal(recovered.idempotency.resonanceReceiptCursor, 1);
 });
 
 test('corrupt Mind Store omits receipt capability while Base remains healthy', async (t) => {

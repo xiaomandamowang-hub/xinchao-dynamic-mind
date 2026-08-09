@@ -34,6 +34,10 @@ import {
   createRecallDeliveryDraft,
   initializeRecallDeliveryState,
 } from './recall-delivery-receipt.js';
+import {
+  initializeMemoryResonanceState,
+  settleMemoryResonance,
+} from './memory-resonance.js';
 
 const config = validateConfig(loadConfig());
 validateServiceToken(config.serviceToken);
@@ -46,6 +50,8 @@ const appraisalEnabled = config.mindV2.storeEnabled && config.mindV2.appraisalsE
 const openLoopEnabled = config.mindV2.storeEnabled && config.mindV2.openLoopsEnabled;
 const recallDeliveryReceiptsEnabled = config.mindV2.storeEnabled
   && config.mindV2.recallDeliveryReceiptsEnabled;
+const memoryResonanceEnabled = config.mindV2.storeEnabled
+  && config.mindV2.resonanceEnabled;
 const mindV2SourceReceiptsEnabled = appraisalEnabled || openLoopEnabled;
 const model = new ModelClient(config.model);
 const ombre = new OmbreClient(config.ombre);
@@ -139,6 +145,51 @@ async function recordRecallDelivery(draft) {
       receiptCount: 0,
       errorCode: recallDeliveryErrorCode(error),
     });
+  }
+}
+
+function resonanceErrorCode(error) {
+  const code = String(error?.code ?? error?.message ?? '');
+  return /^(mind_v2_|resonance_)[a-z0-9_]+$/.test(code)
+    ? code
+    : 'resonance_failed';
+}
+
+async function settleMindV2Resonance(now = new Date(), trigger = 'settle') {
+  if (!memoryResonanceEnabled) return null;
+  let outcome;
+  try {
+    const persisted = await mindV2Store.update((mindState) => {
+      outcome = settleMemoryResonance(mindState, now);
+      return outcome.state;
+    });
+    if (outcome.changed || outcome.consumedCount) {
+      log('mind_v2_memory_resonance', {
+        status: 'settled',
+        trigger,
+        activeCount: outcome.diagnostic.activeCount,
+        consumedCount: outcome.consumedCount,
+        activatedCount: outcome.activatedCount,
+        skippedCount: outcome.skippedCount,
+        expiredCount: outcome.expiredCount,
+        intensityMin: outcome.diagnostic.intensityMin,
+        intensityMax: outcome.diagnostic.intensityMax,
+        globalIntensity: outcome.diagnostic.globalIntensity,
+        digest: outcome.diagnostic.digest,
+        revision: persisted.revision,
+        errorCode: null,
+      });
+    }
+    return outcome.diagnostic;
+  } catch (error) {
+    log('mind_v2_memory_resonance', {
+      status: 'omitted',
+      trigger,
+      activeCount: 0,
+      consumedCount: 0,
+      errorCode: resonanceErrorCode(error),
+    });
+    return null;
   }
 }
 
@@ -324,6 +375,7 @@ async function runCycle() {
   if (cyclePromise) return cyclePromise;
   cyclePromise = (async () => {
     const now = new Date();
+    await settleMindV2Resonance(now, 'settle');
     await synchronizeOmbreHeartbeat();
     let settled;
     await updateState({
@@ -808,6 +860,7 @@ const server = createServer(async (request, response) => {
       }
       const payload = await body(request);
       const sessionId = transportSessionId(request, payload?.method === 'initialize');
+      await settleMindV2Resonance(new Date(), 'request');
       let recallDeliveryDraft = null;
       const result = await handleMcpMessage(payload, {
         defaultSessionId: sessionId,
@@ -989,6 +1042,27 @@ server.listen(config.port, '127.0.0.1', async () => {
           status: 'omitted',
           receiptCount: 0,
           errorCode: recallDeliveryErrorCode(error),
+        });
+      }
+    }
+    if (memoryResonanceEnabled && result.state) {
+      try {
+        let migration;
+        const migrated = await mindV2Store.update((mindState) => {
+          migration = initializeMemoryResonanceState(mindState, new Date());
+          return migration.state;
+        });
+        log('mind_v2_memory_resonance_status', {
+          status: migration.changed ? 'migrated' : 'ready',
+          revision: migrated.revision,
+          activeCount: migrated.resonance.length,
+          errorCode: null,
+        });
+      } catch (error) {
+        log('mind_v2_memory_resonance_status', {
+          status: 'omitted',
+          activeCount: 0,
+          errorCode: resonanceErrorCode(error),
         });
       }
     }

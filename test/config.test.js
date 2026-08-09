@@ -132,9 +132,21 @@ test('Recall Delivery Receipt requires the independent Mind v2 Store', () => {
   assert.equal(validateConfig(value), value);
 });
 
-test('unimplemented Resonance capability fails closed', () => {
+test('Memory Resonance requires both independent Store and Recall Delivery Receipts', () => {
+  assert.throws(
+    () => validateConfig(config({ mindV2: { resonanceEnabled: true } })),
+    /MIND_V2_STORE_ENABLED is required/,
+  );
   assert.throws(
     () => validateConfig(config({ mindV2: { storeEnabled: true, resonanceEnabled: true } })),
-    /not implemented/,
+    /MIND_V2_RECALL_DELIVERY_RECEIPTS_ENABLED is required/,
   );
+  const value = config({
+    mindV2: {
+      storeEnabled: true,
+      recallDeliveryReceiptsEnabled: true,
+      resonanceEnabled: true,
+    },
+  });
+  assert.equal(validateConfig(value), value);
 });
