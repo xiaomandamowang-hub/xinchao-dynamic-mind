@@ -109,11 +109,18 @@ test('Appraisal requires the independent Mind v2 Store', () => {
   assert.equal(validateConfig(value), value);
 });
 
-test('unimplemented Mind v2 child capabilities fail closed', () => {
+test('Open Loop requires the independent Mind v2 Store', () => {
   assert.throws(
-    () => validateConfig(config({ mindV2: { storeEnabled: true, openLoopsEnabled: true } })),
-    /not implemented/,
+    () => validateConfig(config({ mindV2: { openLoopsEnabled: true } })),
+    /MIND_V2_STORE_ENABLED is required/,
   );
+  const value = config({
+    mindV2: { storeEnabled: true, openLoopsEnabled: true },
+  });
+  assert.equal(validateConfig(value), value);
+});
+
+test('unimplemented Resonance capability fails closed', () => {
   assert.throws(
     () => validateConfig(config({ mindV2: { storeEnabled: true, resonanceEnabled: true } })),
     /not implemented/,

@@ -226,13 +226,64 @@ const APPRAISAL_TOOL = {
   },
 };
 
+const OPEN_LOOP_TOOL = {
+  name: 'xinchao_open_loop',
+  title: 'Track a bounded unresolved matter',
+  description: [
+    'Use only after a real xinchao_event has landed and that interaction leaves a relationship matter, task, or shared plan genuinely unresolved.',
+    'Open Loop is current unfinished state, not Memory fact and not a permanent attachment.',
+    'Do not submit chat plaintext or drive values. Memory recall, dreams, thoughts, shadow, and tests cannot create or reopen a loop.',
+    'open creates a bounded loop; resolve requires a later real event proving completion; release means Shen Gui deliberately lets go and does not claim objective completion.',
+  ].join(' '),
+  inputSchema: {
+    type: 'object',
+    properties: {
+      action: { type: 'string', enum: ['open', 'resolve', 'release'] },
+      operation_id: { type: 'string', minLength: 1, maxLength: 120 },
+      source_event_id: { type: 'string', minLength: 1, maxLength: 120 },
+      loop_key: { type: 'string', minLength: 1, maxLength: 120 },
+      kind: { type: 'string', enum: ['relationship', 'task', 'shared_plan'] },
+      summary: { type: 'string', minLength: 1, maxLength: 280 },
+      expectation: { type: 'string', minLength: 1, maxLength: 280 },
+      related_memory_ids: {
+        type: 'array',
+        maxItems: 8,
+        uniqueItems: true,
+        items: { type: 'string', minLength: 1, maxLength: 160, pattern: '^[A-Za-z0-9._:-]+$' },
+      },
+      priority: { type: 'string', enum: ['low', 'medium', 'high'] },
+      due_at: { type: 'string', format: 'date-time', maxLength: 40 },
+      closure_reason: { type: 'string', minLength: 1, maxLength: 240 },
+    },
+    required: ['action', 'operation_id', 'source_event_id', 'loop_key'],
+    allOf: [
+      {
+        if: { properties: { action: { const: 'open' } } },
+        then: { required: ['kind', 'summary', 'expectation', 'priority'] },
+      },
+      {
+        if: { properties: { action: { enum: ['resolve', 'release'] } } },
+        then: { required: ['closure_reason'] },
+      },
+    ],
+    additionalProperties: false,
+  },
+  annotations: {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+  },
+};
+
 function triggerPolicyEnabled(policy = {}) {
   return policy?.enabled === true;
 }
 
-function toolsForTriggerPolicy(policy = {}, appraisalEnabled = false) {
+function toolsForTriggerPolicy(policy = {}, appraisalEnabled = false, openLoopEnabled = false) {
   const tools = structuredClone(XINCHAO_TOOLS);
   if (appraisalEnabled) tools.push(structuredClone(APPRAISAL_TOOL));
+  if (openLoopEnabled) tools.push(structuredClone(OPEN_LOOP_TOOL));
   if (!triggerPolicyEnabled(policy)) return tools;
   const longGapHours = Math.max(1, Math.min(72, Number(policy.contextLongGapHours) || 6));
   const context = tools.find((tool) => tool.name === 'xinchao_context');
@@ -368,6 +419,22 @@ function appraisalArgs(args = {}) {
   };
 }
 
+function openLoopArgs(args = {}) {
+  return {
+    action: args.action,
+    operationId: args.operation_id,
+    sourceEventId: args.source_event_id,
+    loopKey: args.loop_key,
+    kind: args.kind,
+    summary: args.summary,
+    expectation: args.expectation,
+    relatedMemoryIds: args.related_memory_ids,
+    priority: args.priority,
+    dueAt: args.due_at,
+    closureReason: args.closure_reason,
+  };
+}
+
 async function callTool(name, args, handlers) {
   const fallbackSessionId = handlers.defaultSessionId ?? '';
   if (name === 'xinchao_context') {
@@ -401,6 +468,14 @@ async function callTool(name, args, handlers) {
     const duplicate = result.duplicate ? ' duplicate=true' : '';
     return toolText(
       `Appraisal operation accepted: action=${result.action} revision=${result.revision}${duplicate}`,
+      result,
+    );
+  }
+  if (name === 'xinchao_open_loop' && handlers.openLoop) {
+    const result = await handlers.openLoop(openLoopArgs(args));
+    const duplicate = result.duplicate ? ' duplicate=true' : '';
+    return toolText(
+      `Open Loop operation accepted: action=${result.action} revision=${result.revision}${duplicate}`,
       result,
     );
   }
@@ -439,6 +514,11 @@ export async function handleMcpMessage(payload, handlers) {
             'Only call xinchao_appraisal after a real xinchao_event has landed and a clear subjective evaluation exists.',
             'Appraisal is revisable current meaning, not Memory fact; never submit chat plaintext or drive values.',
           ] : []),
+          ...(handlers.openLoop ? [
+            'Only call xinchao_open_loop after a real xinchao_event leaves a bounded unresolved relationship matter, task, or shared plan.',
+            'Open Loop is bounded current unfinished state, not Memory fact and not a permanent attachment.',
+            'Resolve requires a later real event; release means deliberate letting go, not objective completion. Never submit chat plaintext or drive values.',
+          ] : []),
           ...triggerInstructions,
         ].join(''),
       }),
@@ -451,7 +531,11 @@ export async function handleMcpMessage(payload, handlers) {
     return {
       status: 200,
       body: response(id, {
-        tools: toolsForTriggerPolicy(handlers.triggerPolicy, Boolean(handlers.appraisal)),
+        tools: toolsForTriggerPolicy(
+          handlers.triggerPolicy,
+          Boolean(handlers.appraisal),
+          Boolean(handlers.openLoop),
+        ),
       }),
     };
   }
