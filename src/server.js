@@ -4,6 +4,7 @@ import { loadConfig, validateConfig, validateServiceToken } from './config.js';
 import { applyDriveFeedback, applyOmbreHeartbeat, barkAllowed, breathDreamContext, contactIdleAllowed, daytimeEmergenceAllowed, dreamAllowed, newState, pickIntent, proactiveBarkAllowed, recordBark, recordDaytimeEmergence, recordDream, scheduleDaytimeEmergence, settleAndApplyConversationEvent, settleState, topDrives } from './engine.js';
 import { selectUniqueBark } from './bark-dedupe.js';
 import { StateStore } from './state-store.js';
+import { MindV2Store } from './mind-v2-store.js';
 import { ModelClient } from './model-client.js';
 import { OmbreClient } from './ombre-client.js';
 import { MemoryV1Client, MemoryV1ShadowObserver } from './memory-client.js';
@@ -21,6 +22,9 @@ const config = validateConfig(loadConfig());
 validateServiceToken(config.serviceToken);
 
 const store = new StateStore(config.statePath, () => newState());
+const mindV2Store = new MindV2Store(config.mindV2.statePath, {
+  enabled: config.mindV2.storeEnabled,
+});
 const model = new ModelClient(config.model);
 const ombre = new OmbreClient(config.ombre);
 const memoryV1 = new MemoryV1Client(config.memoryV1);
@@ -692,6 +696,14 @@ const server = createServer(async (request, response) => {
 
 server.listen(config.port, '127.0.0.1', async () => {
   await store.read();
+  if (config.mindV2.storeEnabled) {
+    const result = await mindV2Store.initialize();
+    log('mind_v2_store_status', {
+      status: result.status,
+      digest: result.digest,
+      errorCode: result.errorCode,
+    });
+  }
   log('service_started', { port: config.port, shadow: config.shadowMode, modelEnabled: config.model.enabled, barkEnabled: config.bark.enabled });
 });
 

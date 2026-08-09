@@ -18,6 +18,13 @@ export function loadConfig() {
     serviceToken: process.env.SERVICE_TOKEN ?? '',
     statePath: process.env.STATE_PATH ?? '/app/state/state.json',
     journalPath: process.env.TRANSITION_JOURNAL_PATH ?? '/app/state/transitions.jsonl',
+    mindV2: {
+      storeEnabled: bool('MIND_V2_STORE_ENABLED', false),
+      statePath: process.env.MIND_V2_STATE_PATH ?? '/var/lib/xinchao-chatgpt/mind-v2-state.json',
+      appraisalsEnabled: bool('MIND_V2_APPRAISALS_ENABLED', false),
+      openLoopsEnabled: bool('MIND_V2_OPEN_LOOPS_ENABLED', false),
+      resonanceEnabled: bool('MIND_V2_RESONANCE_ENABLED', false),
+    },
     settleIntervalMinutes: number('SETTLE_INTERVAL_MINUTES', 15, 1, 1440),
     sleepAfterMinutes: number('SLEEP_AFTER_MINUTES', 90, 5, 10080),
     shadowMode: bool('SHADOW_MODE', true),
