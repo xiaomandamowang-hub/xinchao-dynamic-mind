@@ -302,3 +302,98 @@ test('xinchao_appraisal passes only its bounded semantic contract', async () => 
   assert.equal('ttl_hours' in received, false);
   assert.doesNotMatch(result.body.result.content[0].text, /reparative|Trust may be returning/);
 });
+
+test('Open Loop tool is feature-gated and exposes only bounded lifecycle input', async () => {
+  const disabled = await handleMcpMessage({
+    jsonrpc: '2.0', id: 40, method: 'tools/list',
+  }, handlers());
+  assert.equal(
+    disabled.body.result.tools.some((item) => item.name === 'xinchao_open_loop'),
+    false,
+  );
+
+  const enabledHandlers = {
+    ...handlers(),
+    openLoop: async (operation) => ({
+      revision: 5,
+      action: operation.action,
+      duplicate: false,
+      openLoop: { id: 'loop-1', status: 'open', version: 1 },
+    }),
+  };
+  const listed = await handleMcpMessage({
+    jsonrpc: '2.0', id: 41, method: 'tools/list',
+  }, enabledHandlers);
+  const tool = listed.body.result.tools.find((item) => item.name === 'xinchao_open_loop');
+  assert.ok(tool);
+  assert.equal(tool.annotations.idempotentHint, true);
+  assert.deepEqual(tool.inputSchema.properties.kind.enum, [
+    'relationship', 'task', 'shared_plan',
+  ]);
+  assert.deepEqual(tool.inputSchema.properties.priority.enum, ['low', 'medium', 'high']);
+  assert.equal(tool.inputSchema.properties.related_memory_ids.maxItems, 8);
+  assert.equal('drive_delta' in tool.inputSchema.properties, false);
+  assert.equal('ttl' in tool.inputSchema.properties, false);
+  assert.equal('ttl_days' in tool.inputSchema.properties, false);
+  assert.deepEqual(tool.inputSchema.required, [
+    'action', 'operation_id', 'source_event_id', 'loop_key',
+  ]);
+  assert.ok(tool.inputSchema.allOf[0].then.required.includes('summary'));
+  assert.ok(tool.inputSchema.allOf[1].then.required.includes('closure_reason'));
+
+  const initialized = await handleMcpMessage({
+    jsonrpc: '2.0', id: 42, method: 'initialize', params: { protocolVersion: '2025-06-18' },
+  }, enabledHandlers);
+  assert.match(initialized.body.result.instructions, /not Memory fact/);
+  assert.match(initialized.body.result.instructions, /release means deliberate letting go/i);
+});
+
+test('xinchao_open_loop passes only its bounded semantic contract', async () => {
+  let received;
+  const result = await handleMcpMessage({
+    jsonrpc: '2.0',
+    id: 43,
+    method: 'tools/call',
+    params: {
+      name: 'xinchao_open_loop',
+      arguments: {
+        action: 'open',
+        operation_id: 'open-loop-operation-1',
+        source_event_id: 'real-event-2',
+        loop_key: 'project:open-loop',
+        kind: 'task',
+        summary: 'The bounded slice remains unfinished.',
+        expectation: 'Complete and verify the slice.',
+        related_memory_ids: ['mem_reference_1'],
+        priority: 'high',
+        due_at: '2026-09-01T12:00:00.000Z',
+        drive_delta: { attachment: 1 },
+        chat_plaintext: 'must not pass',
+        ttl_days: 999,
+      },
+    },
+  }, {
+    ...handlers(),
+    openLoop: async (operation) => {
+      received = operation;
+      return {
+        revision: 5,
+        action: operation.action,
+        duplicate: false,
+        openLoop: { id: 'loop-1', status: 'open', version: 1 },
+      };
+    },
+  });
+  assert.equal(result.body.result.isError, false);
+  assert.equal(received.operationId, 'open-loop-operation-1');
+  assert.equal(received.sourceEventId, 'real-event-2');
+  assert.equal(received.loopKey, 'project:open-loop');
+  assert.deepEqual(received.relatedMemoryIds, ['mem_reference_1']);
+  assert.equal('drive_delta' in received, false);
+  assert.equal('chat_plaintext' in received, false);
+  assert.equal('ttl_days' in received, false);
+  assert.doesNotMatch(
+    result.body.result.content[0].text,
+    /bounded slice remains|Complete and verify|mem_reference/,
+  );
+});

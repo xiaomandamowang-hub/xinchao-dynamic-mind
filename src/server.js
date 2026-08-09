@@ -23,6 +23,11 @@ import {
   registerAppraisalSourceEvent,
   settleAppraisals,
 } from './appraisal-lifecycle.js';
+import {
+  applyOpenLoopOperation,
+  initializeOpenLoopState,
+  settleOpenLoops,
+} from './open-loop-lifecycle.js';
 
 const config = validateConfig(loadConfig());
 validateServiceToken(config.serviceToken);
@@ -32,6 +37,8 @@ const mindV2Store = new MindV2Store(config.mindV2.statePath, {
   enabled: config.mindV2.storeEnabled,
 });
 const appraisalEnabled = config.mindV2.storeEnabled && config.mindV2.appraisalsEnabled;
+const openLoopEnabled = config.mindV2.storeEnabled && config.mindV2.openLoopsEnabled;
+const mindV2SourceReceiptsEnabled = appraisalEnabled || openLoopEnabled;
 const model = new ModelClient(config.model);
 const ombre = new OmbreClient(config.ombre);
 const memoryV1 = new MemoryV1Client(config.memoryV1);
@@ -64,7 +71,7 @@ function mindV2ErrorCode(error) {
 }
 
 async function registerRealEventForAppraisal(event, source, baseState, now) {
-  if (!appraisalEnabled || !['mcp', 'api'].includes(source)) return;
+  if (!mindV2SourceReceiptsEnabled || !['mcp', 'api'].includes(source)) return;
   let outcome;
   try {
     const persisted = await mindV2Store.update((mindState) => {
@@ -87,6 +94,13 @@ async function registerRealEventForAppraisal(event, source, baseState, now) {
       errorCode: mindV2ErrorCode(error),
     });
   }
+}
+
+function openLoopErrorCode(error) {
+  const code = String(error?.code ?? error?.message ?? '');
+  return /^(mind_v2_|open_loop_)[a-z0-9_]+$/.test(code)
+    ? code
+    : 'mind_v2_open_loop_failed';
 }
 
 async function recordAppraisalOperation(operation, now = new Date()) {
@@ -137,6 +151,58 @@ async function settleMindV2Appraisals(now = new Date()) {
     log('mind_v2_appraisal_settled', {
       status: 'omitted',
       errorCode: mindV2ErrorCode(error),
+    });
+  }
+}
+
+async function recordOpenLoopOperation(operation, now = new Date()) {
+  if (!openLoopEnabled) throw new Error('open_loop_disabled');
+  let outcome;
+  try {
+    const persisted = await mindV2Store.update((mindState) => {
+      outcome = applyOpenLoopOperation(mindState, operation, now);
+      return outcome.state;
+    });
+    log('mind_v2_open_loop_operation', {
+      status: outcome.duplicate ? 'duplicate' : 'applied',
+      action: outcome.action,
+      revision: persisted.revision,
+      openLoopCount: persisted.openLoops.length,
+      errorCode: null,
+    });
+    return {
+      revision: persisted.revision,
+      action: outcome.action,
+      duplicate: outcome.duplicate,
+      openLoop: outcome.projection,
+    };
+  } catch (error) {
+    const code = openLoopErrorCode(error);
+    log('mind_v2_open_loop_operation', { status: 'rejected', errorCode: code });
+    throw new Error(code);
+  }
+}
+
+async function settleMindV2OpenLoops(now = new Date()) {
+  if (!openLoopEnabled) return;
+  let outcome;
+  try {
+    const persisted = await mindV2Store.update((mindState) => {
+      outcome = settleOpenLoops(mindState, now);
+      return outcome.state;
+    });
+    if (outcome.changed) {
+      log('mind_v2_open_loop_settled', {
+        status: 'settled',
+        expiredCount: outcome.expired,
+        revision: persisted.revision,
+        errorCode: null,
+      });
+    }
+  } catch (error) {
+    log('mind_v2_open_loop_settled', {
+      status: 'omitted',
+      errorCode: openLoopErrorCode(error),
     });
   }
 }
@@ -418,6 +484,7 @@ async function runCycle() {
       log('daytime_emergence_scheduled', { nextAt: state.nextDaytimeEmergenceAt, revision: state.revision });
     }
     await settleMindV2Appraisals(now);
+    await settleMindV2OpenLoops(now);
     return { state, dreamCreated, barkSent, daytimeSent };
   })().finally(() => { cyclePromise = null; });
   return cyclePromise;
@@ -713,6 +780,9 @@ const server = createServer(async (request, response) => {
         appraisal: appraisalEnabled
           ? async (operation) => recordAppraisalOperation(operation)
           : undefined,
+        openLoop: openLoopEnabled
+          ? async (operation) => recordOpenLoopOperation(operation)
+          : undefined,
       });
       if (payload?.method === 'initialize' || payload?.method === 'tools/call') {
         log('mcp_request', {
@@ -818,6 +888,27 @@ server.listen(config.port, '127.0.0.1', async () => {
         log('mind_v2_appraisal_status', {
           status: 'omitted',
           errorCode: mindV2ErrorCode(error),
+        });
+      }
+    }
+    if (openLoopEnabled && result.state) {
+      try {
+        let migration;
+        const migrated = await mindV2Store.update((mindState) => {
+          migration = initializeOpenLoopState(mindState, new Date());
+          return migration.state;
+        });
+        log('mind_v2_open_loop_status', {
+          status: migration.changed ? 'migrated' : 'ready',
+          revision: migrated.revision,
+          openLoopCount: migrated.openLoops.length,
+          errorCode: null,
+        });
+        await settleMindV2OpenLoops(new Date());
+      } catch (error) {
+        log('mind_v2_open_loop_status', {
+          status: 'omitted',
+          errorCode: openLoopErrorCode(error),
         });
       }
     }

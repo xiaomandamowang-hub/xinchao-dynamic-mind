@@ -162,8 +162,11 @@ export function validateConfig(config) {
   if (config.mindV2?.appraisalsEnabled && !config.mindV2?.storeEnabled) {
     throw new Error('MIND_V2_STORE_ENABLED is required when Appraisal is enabled');
   }
-  if (config.mindV2?.openLoopsEnabled || config.mindV2?.resonanceEnabled) {
-    throw new Error('Open Loop and Resonance are not implemented in this release');
+  if (config.mindV2?.openLoopsEnabled && !config.mindV2?.storeEnabled) {
+    throw new Error('MIND_V2_STORE_ENABLED is required when Open Loop is enabled');
+  }
+  if (config.mindV2?.resonanceEnabled) {
+    throw new Error('Resonance is not implemented in this release');
   }
   return config;
 }
