@@ -8,6 +8,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { newMindV2State } from '../src/mind-v2-state.js';
 
 const projectDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const serverPath = join(projectDir, 'src', 'server.js');
@@ -62,7 +63,12 @@ async function fakeMemory(items, { fail = false } = {}) {
   return { server, calls, url: `http://127.0.0.1:${port}/mcp` };
 }
 
-async function startMind(directory, memoryUrl, { corrupt = false, resonance = false } = {}) {
+async function startMind(directory, memoryUrl, {
+  corrupt = false,
+  resonance = false,
+  projection = false,
+  initialMindState = null,
+} = {}) {
   const probe = createServer();
   const port = await listen(probe);
   await close(probe);
@@ -70,6 +76,9 @@ async function startMind(directory, memoryUrl, { corrupt = false, resonance = fa
   const pathToken = 'recall-delivery-mcp-path-token';
   const output = { value: '' };
   if (corrupt) await writeFile(join(directory, 'mind-v2-state.json'), '{private-corrupt-canary');
+  else if (initialMindState) {
+    await writeFile(join(directory, 'mind-v2-state.json'), JSON.stringify(initialMindState));
+  }
   const child = spawn(process.execPath, [serverPath], {
     cwd: projectDir,
     env: {
@@ -82,10 +91,11 @@ async function startMind(directory, memoryUrl, { corrupt = false, resonance = fa
       OMBRE_HEARTBEAT_FILE: join(directory, 'missing-heartbeat.json'),
       MIND_V2_STORE_ENABLED: 'true',
       MIND_V2_STATE_PATH: join(directory, 'mind-v2-state.json'),
-      MIND_V2_APPRAISALS_ENABLED: 'false',
-      MIND_V2_OPEN_LOOPS_ENABLED: 'false',
+      MIND_V2_APPRAISALS_ENABLED: String(projection),
+      MIND_V2_OPEN_LOOPS_ENABLED: String(projection),
       MIND_V2_RECALL_DELIVERY_RECEIPTS_ENABLED: 'true',
-      MIND_V2_RESONANCE_ENABLED: String(resonance),
+      MIND_V2_RESONANCE_ENABLED: String(resonance || projection),
+      MIND_V2_PROJECTION_ENABLED: String(projection),
       SETTLE_INTERVAL_MINUTES: '1440',
       SHADOW_MODE: 'true',
       MODEL_ENABLED: 'false',
@@ -331,6 +341,71 @@ test('formal Context receipt activates Resonance only on a later Mind request', 
   const recovered = JSON.parse(await readFile(mindPath, 'utf8'));
   assert.equal(recovered.resonance.length, 1);
   assert.equal(recovered.idempotency.resonanceReceiptCursor, 1);
+});
+
+test('formal Context injects bounded Projection before gated Memory without same-round Resonance feedback', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'xinchao-projection-formal-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + 3_600_000).toISOString();
+  const state = newMindV2State(now);
+  state.appraisals = [{
+    id: 'private-appraisal-id', subjectKey: 'project', status: 'active',
+    interpretation: 'private appraisal text canary', relationalMeaning: null,
+    relevance: 0.8, createdAt: now.toISOString(), updatedAt: now.toISOString(), expiresAt,
+  }];
+  state.openLoops = [{
+    id: 'private-loop-id', loopKey: 'project:alpha', kind: 'task',
+    summary: 'private open loop text canary', expectation: 'finish alpha verification',
+    priority: 'high', status: 'open', openedAt: now.toISOString(), updatedAt: now.toISOString(), expiresAt,
+  }];
+  state.resonance = [{
+    memoryId: 'private-old-memory-id', sourceReceiptId: 'private-receipt-id',
+    firstRecalledAt: now.toISOString(), lastRecalledAt: now.toISOString(), repeatCount: 0,
+    baseIntensity: 0.18, effectiveIntensity: 0.18, halfLifeMinutes: 45, expiresAt,
+    sessionFingerprint: 'a'.repeat(32), contextDigest: 'b'.repeat(16),
+  }];
+  const memoryBody = 'private resonance body canary';
+  const memory = await fakeMemory([
+    {
+      id: 'private-old-memory-id', type: 'project', source: 'git', title: 'Old continuity',
+      summary: memoryBody, content: memoryBody, status: 'active', review_state: 'confirmed',
+      occurred_at: now.toISOString(),
+    },
+    {
+      id: 'new-alpha-memory', type: 'project', source: 'git', title: 'Alpha architecture',
+      summary: 'alpha architecture decision', content: 'alpha architecture decision',
+      status: 'active', review_state: 'confirmed', occurred_at: now.toISOString(),
+    },
+  ]);
+  t.after(() => close(memory.server));
+  const mind = await startMind(directory, memory.url, {
+    projection: true,
+    initialMindState: state,
+  });
+  t.after(() => stopMind(mind.child));
+  await addHandoff(mind, 'projection-session');
+
+  const response = await mcpContext(mind, 'projection-session');
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  const context = payload.result.content[0].text;
+  assert.match(context, /不是客观事实/);
+  assert.match(context, /private appraisal text canary/);
+  assert.match(context, /private open loop text canary/);
+  assert.match(context, new RegExp(memoryBody));
+  assert.ok(context.indexOf('Mind v2') < context.indexOf('alpha architecture'));
+  assert.doesNotMatch(context, /private-appraisal-id|private-loop-id|private-old-memory-id|private-receipt-id|0\.18/);
+  assert.equal(memory.calls.filter((name) => name === 'fetch').length >= 1, true);
+
+  const stored = await waitForReceipts(join(directory, 'mind-v2-state.json'), 1);
+  assert.equal(stored.resonance.length, 1);
+  assert.equal(stored.resonance[0].memoryId, 'private-old-memory-id');
+  assert.equal(memory.calls.includes('remember'), false);
+  assert.equal(memory.calls.includes('read_evidence'), false);
+  assert.doesNotMatch(mind.output.value, /private appraisal text canary|private open loop text canary|private resonance body canary/);
+  assert.doesNotMatch(mind.output.value, /private-appraisal-id|private-loop-id|private-old-memory-id|private-receipt-id/);
+  assert.match(mind.output.value, /"event":"mind_v2_projection"/);
 });
 
 test('corrupt Mind Store omits receipt capability while Base remains healthy', async (t) => {

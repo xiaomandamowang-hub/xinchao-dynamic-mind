@@ -92,6 +92,29 @@ test('the transport refuses every tool outside the read-only allowlist', async (
   await assert.rejects(() => client.call('read_evidence', {}), /not allowed/);
 });
 
+test('direct projection lookup uses fetch only and revalidates active confirmed status', async () => {
+  const client = new MemoryV1Client(config());
+  const calls = [];
+  client.call = async (name, args) => {
+    calls.push({ name, args });
+    return response({ memory: {
+      id: args.id,
+      status: 'active',
+      review_state: 'confirmed',
+      summary: 'A compact deliverable memory.',
+    } });
+  };
+  assert.deepEqual(await client.directProjectionMemory('memory-a'), {
+    projectionText: 'A compact deliverable memory.',
+  });
+  assert.deepEqual(calls, [{ name: 'fetch', args: { id: 'memory-a' } }]);
+
+  client.call = async () => response({ memory: {
+    id: 'memory-a', status: 'contested', review_state: 'confirmed', summary: 'blocked',
+  } });
+  assert.equal(await client.directProjectionMemory('memory-a'), null);
+});
+
 test('shadow failure degrades to empty diagnostics and never throws into the caller', async () => {
   const observer = new MemoryV1ShadowObserver({
     recentMaterial: async () => { throw new Error('fetch failed'); },

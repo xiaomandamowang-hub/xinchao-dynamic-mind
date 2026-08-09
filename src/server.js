@@ -11,7 +11,7 @@ import { MemoryV1Client, MemoryV1ShadowObserver } from './memory-client.js';
 import { promoteShadowContextCandidate, ShadowContextCompositionRunner } from './shadow-context-composer.js';
 import { BarkClient } from './bark-client.js';
 import { readOmbreHeartbeat } from './heartbeat-store.js';
-import { buildContextEnvelope, contextDeliveryState, recordContextDelivery } from './context-envelope.js';
+import { buildContextEnvelope, contextDeliveryState, estimateTokens, recordContextDelivery } from './context-envelope.js';
 import { TransitionJournal } from './transition-journal.js';
 import { handleMcpMessage } from './mcp-protocol.js';
 import { OAuthProvider } from './oauth-provider.js';
@@ -38,6 +38,10 @@ import {
   initializeMemoryResonanceState,
   settleMemoryResonance,
 } from './memory-resonance.js';
+import {
+  buildMindV2Projection,
+  MIND_V2_PROJECTION_MAX_TOKENS,
+} from './mind-v2-projection.js';
 
 const config = validateConfig(loadConfig());
 validateServiceToken(config.serviceToken);
@@ -52,6 +56,8 @@ const recallDeliveryReceiptsEnabled = config.mindV2.storeEnabled
   && config.mindV2.recallDeliveryReceiptsEnabled;
 const memoryResonanceEnabled = config.mindV2.storeEnabled
   && config.mindV2.resonanceEnabled;
+const mindV2ProjectionEnabled = config.mindV2.storeEnabled
+  && config.mindV2.projectionEnabled;
 const mindV2SourceReceiptsEnabled = appraisalEnabled || openLoopEnabled;
 const model = new ModelClient(config.model);
 const ombre = new OmbreClient(config.ombre);
@@ -294,6 +300,42 @@ async function settleMindV2OpenLoops(now = new Date()) {
       status: 'omitted',
       errorCode: openLoopErrorCode(error),
     });
+  }
+}
+
+async function composeMindV2Projection(now = new Date()) {
+  if (!mindV2ProjectionEnabled) return '';
+  try {
+    const mindState = await mindV2Store.read();
+    if (!mindState) throw new Error('mind_v2_projection_store_unavailable');
+    const headingBudget = estimateTokens('[Mind v2 当前主观状态]');
+    const result = await buildMindV2Projection(mindState, {
+      memoryClient: memoryV1,
+      now,
+      maxTokens: Math.max(1, MIND_V2_PROJECTION_MAX_TOKENS - headingBudget),
+    });
+    log('mind_v2_projection', {
+      status: result.text ? 'projected' : 'empty',
+      projectedCount: result.diagnostic.projectedCount,
+      tokenCount: result.diagnostic.tokenCount,
+      layerCount: result.diagnostic.layerCount,
+      appraisalCount: result.diagnostic.appraisalCount,
+      openLoopCount: result.diagnostic.openLoopCount,
+      resonanceCount: result.diagnostic.resonanceCount,
+      lookupFailureCount: result.diagnostic.lookupFailures,
+      revision: mindState.revision,
+      errorCode: null,
+    });
+    return result.text;
+  } catch {
+    log('mind_v2_projection', {
+      status: 'omitted',
+      projectedCount: 0,
+      tokenCount: 0,
+      layerCount: 0,
+      errorCode: 'mind_v2_projection_failed',
+    });
+    return '';
   }
 }
 
@@ -666,6 +708,17 @@ async function createContextEnvelope({
 }) {
   let state = await store.read();
   const delivery = contextDeliveryState(state, sessionId, mode, now, config.context.handoffOnceHours);
+  let mindV2Text = '';
+  if (
+    mindV2ProjectionEnabled
+    && sourceOperation === 'mcp:xinchao_context'
+    && (!delivery.alreadyDelivered || force)
+  ) {
+    await settleMindV2Appraisals(now);
+    await settleMindV2OpenLoops(now);
+    await settleMindV2Resonance(now, 'context');
+    mindV2Text = await composeMindV2Projection(now);
+  }
   let ombreText = '';
   let ombreWarning = '';
   if (
@@ -686,6 +739,7 @@ async function createContextEnvelope({
     sessionId,
     mode,
     ombreText,
+    mindV2Text,
     maxTokens,
     ttlMinutes: config.context.ttlMinutes,
     now,
@@ -860,7 +914,11 @@ const server = createServer(async (request, response) => {
       }
       const payload = await body(request);
       const sessionId = transportSessionId(request, payload?.method === 'initialize');
-      await settleMindV2Resonance(new Date(), 'request');
+      const formalContextRequest = payload?.method === 'tools/call'
+        && payload?.params?.name === 'xinchao_context';
+      if (!formalContextRequest || !mindV2ProjectionEnabled) {
+        await settleMindV2Resonance(new Date(), 'request');
+      }
       let recallDeliveryDraft = null;
       const result = await handleMcpMessage(payload, {
         defaultSessionId: sessionId,

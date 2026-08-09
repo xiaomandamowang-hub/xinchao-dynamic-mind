@@ -229,6 +229,19 @@ export class MemoryV1Client {
     });
   }
 
+  async directProjectionMemory(memoryId) {
+    const id = compact(memoryId);
+    if (!id) return null;
+    const response = await this.call('fetch', { id });
+    const memory = structuredContent(response).memory ?? null;
+    if (!memory || compact(memory.id) !== id) return null;
+    if (compact(memory.status).toLowerCase() !== 'active') return null;
+    if (compact(memory.review_state).toLowerCase() !== 'confirmed') return null;
+    const projectionText = compact(memory.summary || memory.content);
+    if (!projectionText) return null;
+    return { projectionText };
+  }
+
   async #searchMaterial({ kind, query, maxTokens }) {
     const searchResponse = await this.call('search', { query, limit: this.config.maxResults });
     const items = structuredContent(searchResponse).items ?? [];

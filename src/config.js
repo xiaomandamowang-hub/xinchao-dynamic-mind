@@ -25,6 +25,7 @@ export function loadConfig() {
       openLoopsEnabled: bool('MIND_V2_OPEN_LOOPS_ENABLED', false),
       recallDeliveryReceiptsEnabled: bool('MIND_V2_RECALL_DELIVERY_RECEIPTS_ENABLED', false),
       resonanceEnabled: bool('MIND_V2_RESONANCE_ENABLED', false),
+      projectionEnabled: bool('MIND_V2_PROJECTION_ENABLED', false),
     },
     settleIntervalMinutes: number('SETTLE_INTERVAL_MINUTES', 15, 1, 1440),
     sleepAfterMinutes: number('SLEEP_AFTER_MINUTES', 90, 5, 10080),
@@ -174,6 +175,9 @@ export function validateConfig(config) {
   }
   if (config.mindV2?.resonanceEnabled && !config.mindV2?.recallDeliveryReceiptsEnabled) {
     throw new Error('MIND_V2_RECALL_DELIVERY_RECEIPTS_ENABLED is required when Memory Resonance is enabled');
+  }
+  if (config.mindV2?.projectionEnabled && !config.mindV2?.storeEnabled) {
+    throw new Error('MIND_V2_PROJECTION_ENABLED requires MIND_V2_STORE_ENABLED');
   }
   return config;
 }

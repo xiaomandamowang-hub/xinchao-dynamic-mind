@@ -165,6 +165,7 @@ export function buildContextEnvelope({
   sessionId,
   mode = 'session_start',
   ombreText = '',
+  mindV2Text = '',
   maxTokens = 2200,
   ttlMinutes = 15,
   now = new Date(),
@@ -203,6 +204,15 @@ export function buildContextEnvelope({
       data: dynamic,
     },
   ];
+  const projection = compact(mindV2Text);
+  if (projection) {
+    sections.push({
+      id: 'mind_v2_projection',
+      source: 'mind-v2',
+      ttl: 'current',
+      content: projection,
+    });
+  }
   const handoffText = renderHandoffNotes(state, generatedAt, 3);
   if (handoffText) {
     sections.push({
@@ -232,6 +242,7 @@ export function buildContextEnvelope({
   }
 
   const labels = {
+    mind_v2_projection: 'Mind v2 当前主观状态',
     dynamic_state: '心潮动态状态',
     handoff_notes: '近期交接便签（非原文）',
     dream_residue: '梦境余韵',

@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto';
 import { estimateTokens, trimToTokenBudget } from './context-envelope.js';
 
-const BASE_SECTION_IDS = new Set(['dynamic_state', 'handoff_notes', 'dream_residue']);
+const BASE_SECTION_IDS = new Set(['dynamic_state', 'mind_v2_projection', 'handoff_notes', 'dream_residue']);
 const ALLOWED_MEMORY_STATUSES = new Set(['active', 'contested']);
 const STABLE_MEMORY_TYPES = new Set(['core', 'preferences', 'relationship']);
 const SECTION_LABELS = Object.freeze({
+  mind_v2_projection: 'Mind v2 current subjective state',
   dynamic_state: '心潮动态状态',
   handoff_notes: '近期交接便签（非原文）',
   recent_continuity: '近期连续性（不替代基岩）',

@@ -85,6 +85,26 @@ test('session-start delivery is suppressed within the configured window', () => 
   assert.equal(envelope.additionalContext, '');
 });
 
+test('Mind v2 projection is ordered after dynamic state and before handoff and Memory', () => {
+  const now = new Date('2026-07-28T01:00:00Z');
+  const state = recordHandoffNote(newState(now), {
+    sessionId: 'earlier-window', eventId: 'handoff-projection', note: 'Continue the prior task.', now,
+  }).state;
+  const envelope = buildContextEnvelope({
+    state,
+    sessionId: 'window-projection',
+    mindV2Text: 'Subjective current state only.',
+    ombreText: 'Confirmed gated Memory.',
+    now,
+  });
+  assert.deepEqual(envelope.sections.map((section) => section.id), [
+    'dynamic_state',
+    'mind_v2_projection',
+    'handoff_notes',
+    'recent_continuity',
+  ]);
+});
+
 test('turn envelopes are not blocked by session-start delivery state', () => {
   const now = new Date('2026-07-28T01:00:00Z');
   const state = recordContextDelivery(newState(now), {

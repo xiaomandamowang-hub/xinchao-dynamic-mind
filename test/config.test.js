@@ -27,6 +27,7 @@ function config(overrides = {}) {
       openLoopsEnabled: false,
       recallDeliveryReceiptsEnabled: false,
       resonanceEnabled: false,
+      projectionEnabled: false,
       ...(overrides.mindV2 || {}),
     },
   };
@@ -148,5 +149,14 @@ test('Memory Resonance requires both independent Store and Recall Delivery Recei
       resonanceEnabled: true,
     },
   });
+  assert.equal(validateConfig(value), value);
+});
+
+test('Mind v2 Projection is independently feature-gated behind the Store', () => {
+  assert.throws(
+    () => validateConfig(config({ mindV2: { projectionEnabled: true } })),
+    /MIND_V2_PROJECTION_ENABLED requires MIND_V2_STORE_ENABLED/,
+  );
+  const value = config({ mindV2: { projectionEnabled: true, storeEnabled: true } });
   assert.equal(validateConfig(value), value);
 });
