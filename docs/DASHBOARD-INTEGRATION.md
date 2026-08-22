@@ -56,6 +56,24 @@ const snapshot = await fetch('/dashboard/api/snapshot', {
 }).then((response) => response.json());
 ```
 
+## 跨源浏览器直连
+
+公开可视化网页不会替用户运行心潮，也无法访问另一台设备的 `localhost`。
+只有当浏览器与心潮运行在同一台设备上时，才可开启跨源直连：
+
+```env
+DASHBOARD_ALLOWED_ORIGINS=https://xinchaomind.uk
+```
+
+修改后重启心潮。前端用 `POST /dashboard/session` 并显式传
+`{"mode":"header"}` 换取短期会话 token，后续通过
+`Authorization: Bearer <session-token>` 读取 `/dashboard/api/*`。
+长期的 `DASHBOARD_ACCESS_TOKEN` 只用于换取会话，不能直接当 Bearer token。
+
+手机访问电脑、N100 或 VPS 上的心潮时，手机里的 `localhost` 只代表手机自己；
+必须先为心潮配置公网可达的 HTTPS 地址，再使用服务端中继或同源部署方式。
+`DASHBOARD_ALLOWED_ORIGINS` 只填写实际使用的完整来源，不能填写 `*`。
+
 除下述语义互动外，Dashboard API 保持只读，不提供直接修改驱动力、删除记忆或执行管理动作的浏览器接口。
 
 唯一的有界写入口是语义互动事件：

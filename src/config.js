@@ -1,6 +1,31 @@
+import { realpathSync } from 'node:fs';
+import { basename, dirname, isAbsolute, resolve } from 'node:path';
+import {
+  STATE_PUBLICATION_PROFILE_CONTROLLED_READER_V1,
+  STATE_PUBLICATION_PROFILE_PRIVATE,
+  inspectStatePublicationProfile,
+} from './state-publication-profile.js';
+
 function bool(name, fallback = false) {
   const raw = process.env[name];
   return raw == null ? fallback : ['1', 'true', 'yes', 'on'].includes(raw.toLowerCase());
+}
+
+function optionalInteger(name) {
+  const raw = process.env[name];
+  if (raw == null || raw === '') return null;
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) throw new Error(`${name} must be a positive integer`);
+  return parsed;
+}
+
+function canonicalParent(name, value) {
+  if (!isAbsolute(String(value || ''))) throw new Error(`${name} must be an absolute path`);
+  try {
+    return realpathSync(dirname(resolve(String(value))));
+  } catch {
+    throw new Error(`${name} parent directory must already exist`);
+  }
 }
 
 function number(name, fallback, min, max) {
@@ -19,6 +44,8 @@ export function loadConfig() {
     port: number('PORT', 18110, 1, 65535),
     serviceToken: process.env.SERVICE_TOKEN ?? '',
     statePath: process.env.STATE_PATH ?? '/app/state/state.json',
+    statePublicationProfile: process.env.STATE_PUBLICATION_PROFILE ?? STATE_PUBLICATION_PROFILE_PRIVATE,
+    stateReaderGid: optionalInteger('STATE_READER_GID'),
     journalPath: process.env.TRANSITION_JOURNAL_PATH ?? '/app/state/transitions.jsonl',
     settleIntervalMinutes: number('SETTLE_INTERVAL_MINUTES', 15, 1, 1440),
     sleepAfterMinutes: number('SLEEP_AFTER_MINUTES', 90, 5, 10080),
@@ -132,6 +159,31 @@ export function loadConfig() {
 }
 
 export function validateConfig(config) {
+  let publication;
+  try {
+    publication = inspectStatePublicationProfile(config.statePublicationProfile);
+  } catch {
+    throw new Error('STATE_PUBLICATION_PROFILE must be private or controlled-reader-v1');
+  }
+  if (publication.profile === STATE_PUBLICATION_PROFILE_CONTROLLED_READER_V1) {
+    if (!Number.isSafeInteger(config.stateReaderGid) || config.stateReaderGid < 1) {
+      throw new Error('STATE_READER_GID is required for controlled-reader-v1');
+    }
+    if (!isAbsolute(config.statePath) || basename(config.statePath) !== 'state.json') {
+      throw new Error('controlled-reader-v1 requires an absolute dedicated STATE_PATH ending in state.json');
+    }
+    const stateDirectory = canonicalParent('STATE_PATH', config.statePath);
+    const forbiddenNeighbors = [
+      ['TRANSITION_JOURNAL_PATH', config.journalPath],
+      ['OAUTH_STATE_PATH', config.oauth?.statePath],
+      ['BRIDGE_STATE_PATH', config.bridge?.statePath],
+    ];
+    if (forbiddenNeighbors.some(([name, value]) => canonicalParent(name, value) === stateDirectory)) {
+      throw new Error('controlled-reader-v1 STATE_PATH must have a dedicated parent directory');
+    }
+  } else if (config.stateReaderGid != null) {
+    throw new Error('STATE_READER_GID is only valid for controlled-reader-v1');
+  }
   const externalMemoryEnabled = Boolean(
     config.ombre.readEnabled
     || config.ombre.writeEnabled
