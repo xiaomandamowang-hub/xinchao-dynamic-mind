@@ -28,7 +28,10 @@ if (config.serviceToken.length < 32) {
   throw new Error('SERVICE_TOKEN must be at least 32 characters — generate one: openssl rand -hex 32');
 }
 
-const store = new StateStore(config.statePath, () => newState());
+const store = new StateStore(config.statePath, () => newState(), {
+  publicationProfile: config.statePublicationProfile,
+  readerGid: config.stateReaderGid,
+});
 const model = new ModelClient(config.model);
 const ombre = new OmbreClient(config.ombre);
 const bark = new BarkClient(config.bark);
