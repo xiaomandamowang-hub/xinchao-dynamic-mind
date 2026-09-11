@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
-import { loadConfig, validateConfig } from './config.js';
+import { loadConfig, validateConfig, validateServiceToken } from './config.js';
 import { emotionCoords, emotionSummary, stampEmotionArgs } from './emotion.js';
 import { recordSurfacing, resolveAwareness, scanAwareness, awarenessSummary } from './awareness.js';
 import { detectSelfSignals, renderNowLine, SELF_REPORT_TYPES } from './self-signals.js';
@@ -9,11 +9,14 @@ import { INTERACTION_TYPES, applyDriveFeedback, applyMemoryResonance, applyOmbre
 import { buildInteractionBridgeMessage } from './interaction-messages.js';
 import { selectUniqueBark } from './bark-dedupe.js';
 import { StateStore } from './state-store.js';
+import { MindV2Store } from './mind-v2-store.js';
 import { ModelClient } from './model-client.js';
 import { OmbreClient, parseSurfacedDomains } from './ombre-client.js';
+import { MemoryV1Client, MemoryV1ShadowObserver } from './memory-client.js';
+import { promoteShadowContextCandidate, ShadowContextCompositionRunner } from './shadow-context-composer.js';
 import { BarkClient } from './bark-client.js';
 import { readOmbreHeartbeat } from './heartbeat-store.js';
-import { buildContextEnvelope, contextDeliveryState, recordContextDelivery, buildNowCompact } from './context-envelope.js';
+import { buildContextEnvelope, buildNowCompact, contextDeliveryState, estimateTokens, recordContextDelivery } from './context-envelope.js';
 import { TransitionJournal } from './transition-journal.js';
 import { handleMcpMessage } from './mcp-protocol.js';
 import { OAuthProvider } from './oauth-provider.js';
@@ -26,6 +29,31 @@ import { boardEnabled, postBoardMessage, readBoardMessages } from './board-clien
 import { SYSTEM_VERSION } from './version.js';
 import { memoryConnectionState } from './connection-diagnostics.js';
 import { PersonalityStore, computePersonalityStats } from './personality-store.js';
+import {
+  applyAppraisalOperation,
+  initializeAppraisalState,
+  registerAppraisalSourceEvent,
+  settleAppraisals,
+} from './appraisal-lifecycle.js';
+import {
+  applyOpenLoopOperation,
+  initializeOpenLoopState,
+  settleOpenLoops,
+} from './open-loop-lifecycle.js';
+import {
+  applyRecallDeliveryDraft,
+  commitRecallDeliveryOnSuccessfulResponse,
+  createRecallDeliveryDraft,
+  initializeRecallDeliveryState,
+} from './recall-delivery-receipt.js';
+import {
+  initializeMemoryResonanceState,
+  settleMemoryResonance,
+} from './memory-resonance.js';
+import {
+  buildMindV2Projection,
+  MIND_V2_PROJECTION_MAX_TOKENS,
+} from './mind-v2-projection.js';
 
 // 情绪 → 记忆：只在开关打开时把此刻情绪坐标交给 OB 做共振排序。
 function emotionForOmbre(state) {
@@ -33,19 +61,39 @@ function emotionForOmbre(state) {
 }
 
 const config = validateConfig(loadConfig());
-if (!config.serviceToken) throw new Error('SERVICE_TOKEN is required');
-// 拒绝占位值和弱 token —— 忘了换示例值就启动，等于把钥匙印在说明书上。
-if (/^replace-with/i.test(config.serviceToken)) {
-  throw new Error('SERVICE_TOKEN is still the placeholder from .env.example — generate a real one: openssl rand -hex 32');
-}
-if (config.serviceToken.length < 32) {
-  throw new Error('SERVICE_TOKEN must be at least 32 characters — generate one: openssl rand -hex 32');
-}
+validateServiceToken(config.serviceToken);
 
-const store = new StateStore(config.statePath, () => newState());
+const store = new StateStore(config.statePath, () => newState(), {
+  publicationProfile: config.statePublicationProfile,
+  readerGid: config.stateReaderGid,
+});
+const mindV2Store = new MindV2Store(config.mindV2.statePath, {
+  enabled: config.mindV2.storeEnabled,
+});
+const appraisalEnabled = config.mindV2.storeEnabled && config.mindV2.appraisalsEnabled;
+const openLoopEnabled = config.mindV2.storeEnabled && config.mindV2.openLoopsEnabled;
+const recallDeliveryReceiptsEnabled = config.mindV2.storeEnabled
+  && config.mindV2.recallDeliveryReceiptsEnabled;
+const memoryResonanceEnabled = config.mindV2.storeEnabled
+  && config.mindV2.resonanceEnabled;
+const mindV2ProjectionEnabled = config.mindV2.storeEnabled
+  && config.mindV2.projectionEnabled;
+const mindV2SourceReceiptsEnabled = appraisalEnabled || openLoopEnabled;
 const model = new ModelClient(config.model);
 const ombre = new OmbreClient(config.ombre);
 const blackBox = new BlackBox(config.box.statePath);
+const memoryV1 = new MemoryV1Client(config.memoryV1);
+const memoryV1Shadow = new MemoryV1ShadowObserver(memoryV1, {
+  ttlMinutes: config.memoryV1.dedupeTtlMinutes,
+});
+const shadowContextComposition = new ShadowContextCompositionRunner(memoryV1, {
+  ttlMinutes: config.memoryV1.dedupeTtlMinutes,
+  maxTokens: config.memoryV1.shadowContextMaxTokens,
+  memoryMaxTokens: config.memoryV1.shadowContextMemoryMaxTokens,
+  memoryMaxRatio: config.memoryV1.shadowContextMemoryMaxRatio,
+  maxMemoryReferences: config.memoryV1.shadowContextMaxReferences,
+  perMemoryMaxTokens: config.memoryV1.shadowContextPerMemoryMaxTokens,
+});
 const bark = new BarkClient(config.bark);
 const journal = new TransitionJournal(config.journalPath);
 const oauth = new OAuthProvider(config.oauth, (event, fields = {}) => log(event, fields));
@@ -63,6 +111,287 @@ let cyclePromise = null;
 
 function log(event, fields = {}) {
   console.log(JSON.stringify({ at: new Date().toISOString(), event, ...fields }));
+}
+
+function mindV2ErrorCode(error) {
+  const code = String(error?.code ?? error?.message ?? '');
+  return /^(mind_v2_|appraisal_)[a-z0-9_]+$/.test(code)
+    ? code
+    : 'mind_v2_appraisal_failed';
+}
+
+async function registerRealEventForAppraisal(event, source, baseState, now) {
+  if (!mindV2SourceReceiptsEnabled || !['mcp', 'api'].includes(source)) return;
+  let outcome;
+  try {
+    const persisted = await mindV2Store.update((mindState) => {
+      outcome = registerAppraisalSourceEvent(mindState, {
+        eventId: event.eventId ?? event.event_id,
+        source,
+        baseState,
+        baseRevision: baseState.revision,
+      }, now);
+      return outcome.state;
+    });
+    log('mind_v2_appraisal_source', {
+      status: outcome.duplicate ? 'duplicate' : 'recorded',
+      revision: persisted.revision,
+      errorCode: null,
+    });
+  } catch (error) {
+    log('mind_v2_appraisal_source', {
+      status: 'omitted',
+      errorCode: mindV2ErrorCode(error),
+    });
+  }
+}
+
+function openLoopErrorCode(error) {
+  const code = String(error?.code ?? error?.message ?? '');
+  return /^(mind_v2_|open_loop_)[a-z0-9_]+$/.test(code)
+    ? code
+    : 'mind_v2_open_loop_failed';
+}
+
+function recallDeliveryErrorCode(error) {
+  const code = String(error?.code ?? error?.message ?? '');
+  return /^(mind_v2_|recall_delivery_)[a-z0-9_]+$/.test(code)
+    ? code
+    : 'recall_delivery_failed';
+}
+
+async function recordRecallDelivery(draft) {
+  if (!recallDeliveryReceiptsEnabled || !draft) return;
+  let outcome;
+  try {
+    const persisted = await mindV2Store.update((mindState) => {
+      outcome = applyRecallDeliveryDraft(mindState, draft);
+      return outcome.state;
+    });
+    log('mind_v2_recall_delivery', {
+      status: outcome.addedCount ? 'recorded' : 'duplicate',
+      receiptCount: outcome.addedCount,
+      duplicateCount: outcome.duplicateCount,
+      revision: persisted.revision,
+      errorCode: null,
+    });
+  } catch (error) {
+    log('mind_v2_recall_delivery', {
+      status: 'omitted',
+      receiptCount: 0,
+      errorCode: recallDeliveryErrorCode(error),
+    });
+  }
+}
+
+function resonanceErrorCode(error) {
+  const code = String(error?.code ?? error?.message ?? '');
+  return /^(mind_v2_|resonance_)[a-z0-9_]+$/.test(code)
+    ? code
+    : 'resonance_failed';
+}
+
+async function settleMindV2Resonance(now = new Date(), trigger = 'settle') {
+  if (!memoryResonanceEnabled) return null;
+  let outcome;
+  try {
+    const persisted = await mindV2Store.update((mindState) => {
+      outcome = settleMemoryResonance(mindState, now);
+      return outcome.state;
+    });
+    if (outcome.changed || outcome.consumedCount) {
+      log('mind_v2_memory_resonance', {
+        status: 'settled',
+        trigger,
+        activeCount: outcome.diagnostic.activeCount,
+        consumedCount: outcome.consumedCount,
+        activatedCount: outcome.activatedCount,
+        skippedCount: outcome.skippedCount,
+        expiredCount: outcome.expiredCount,
+        intensityMin: outcome.diagnostic.intensityMin,
+        intensityMax: outcome.diagnostic.intensityMax,
+        globalIntensity: outcome.diagnostic.globalIntensity,
+        digest: outcome.diagnostic.digest,
+        revision: persisted.revision,
+        errorCode: null,
+      });
+    }
+    return outcome.diagnostic;
+  } catch (error) {
+    log('mind_v2_memory_resonance', {
+      status: 'omitted',
+      trigger,
+      activeCount: 0,
+      consumedCount: 0,
+      errorCode: resonanceErrorCode(error),
+    });
+    return null;
+  }
+}
+
+async function recordAppraisalOperation(operation, now = new Date()) {
+  if (!appraisalEnabled) throw new Error('appraisal_disabled');
+  let outcome;
+  try {
+    const persisted = await mindV2Store.update((mindState) => {
+      outcome = applyAppraisalOperation(mindState, operation, now);
+      return outcome.state;
+    });
+    log('mind_v2_appraisal_operation', {
+      status: outcome.duplicate ? 'duplicate' : 'applied',
+      action: outcome.action,
+      revision: persisted.revision,
+      appraisalCount: persisted.appraisals.length,
+      errorCode: null,
+    });
+    return {
+      revision: persisted.revision,
+      action: outcome.action,
+      duplicate: outcome.duplicate,
+      appraisal: outcome.projection,
+    };
+  } catch (error) {
+    const code = mindV2ErrorCode(error);
+    log('mind_v2_appraisal_operation', { status: 'rejected', errorCode: code });
+    throw new Error(code);
+  }
+}
+
+async function settleMindV2Appraisals(now = new Date()) {
+  if (!appraisalEnabled) return;
+  let outcome;
+  try {
+    const persisted = await mindV2Store.update((mindState) => {
+      outcome = settleAppraisals(mindState, now);
+      return outcome.state;
+    });
+    if (outcome.changed) {
+      log('mind_v2_appraisal_settled', {
+        status: 'settled',
+        expiredCount: outcome.expired,
+        revision: persisted.revision,
+        errorCode: null,
+      });
+    }
+  } catch (error) {
+    log('mind_v2_appraisal_settled', {
+      status: 'omitted',
+      errorCode: mindV2ErrorCode(error),
+    });
+  }
+}
+
+async function recordOpenLoopOperation(operation, now = new Date()) {
+  if (!openLoopEnabled) throw new Error('open_loop_disabled');
+  let outcome;
+  try {
+    const persisted = await mindV2Store.update((mindState) => {
+      outcome = applyOpenLoopOperation(mindState, operation, now);
+      return outcome.state;
+    });
+    log('mind_v2_open_loop_operation', {
+      status: outcome.duplicate ? 'duplicate' : 'applied',
+      action: outcome.action,
+      revision: persisted.revision,
+      openLoopCount: persisted.openLoops.length,
+      errorCode: null,
+    });
+    return {
+      revision: persisted.revision,
+      action: outcome.action,
+      duplicate: outcome.duplicate,
+      openLoop: outcome.projection,
+    };
+  } catch (error) {
+    const code = openLoopErrorCode(error);
+    log('mind_v2_open_loop_operation', { status: 'rejected', errorCode: code });
+    throw new Error(code);
+  }
+}
+
+async function settleMindV2OpenLoops(now = new Date()) {
+  if (!openLoopEnabled) return;
+  let outcome;
+  try {
+    const persisted = await mindV2Store.update((mindState) => {
+      outcome = settleOpenLoops(mindState, now);
+      return outcome.state;
+    });
+    if (outcome.changed) {
+      log('mind_v2_open_loop_settled', {
+        status: 'settled',
+        expiredCount: outcome.expired,
+        revision: persisted.revision,
+        errorCode: null,
+      });
+    }
+  } catch (error) {
+    log('mind_v2_open_loop_settled', {
+      status: 'omitted',
+      errorCode: openLoopErrorCode(error),
+    });
+  }
+}
+
+async function composeMindV2Projection(now = new Date()) {
+  if (!mindV2ProjectionEnabled) return '';
+  try {
+    const mindState = await mindV2Store.read();
+    if (!mindState) throw new Error('mind_v2_projection_store_unavailable');
+    const headingBudget = estimateTokens('[Mind v2 当前主观状态]');
+    const result = await buildMindV2Projection(mindState, {
+      memoryClient: memoryV1,
+      now,
+      maxTokens: Math.max(1, MIND_V2_PROJECTION_MAX_TOKENS - headingBudget),
+    });
+    log('mind_v2_projection', {
+      status: result.text ? 'projected' : 'empty',
+      projectedCount: result.diagnostic.projectedCount,
+      tokenCount: result.diagnostic.tokenCount,
+      layerCount: result.diagnostic.layerCount,
+      appraisalCount: result.diagnostic.appraisalCount,
+      openLoopCount: result.diagnostic.openLoopCount,
+      resonanceCount: result.diagnostic.resonanceCount,
+      lookupFailureCount: result.diagnostic.lookupFailures,
+      revision: mindState.revision,
+      errorCode: null,
+    });
+    return result.text;
+  } catch {
+    log('mind_v2_projection', {
+      status: 'omitted',
+      projectedCount: 0,
+      tokenCount: 0,
+      layerCount: 0,
+      errorCode: 'mind_v2_projection_failed',
+    });
+    return '';
+  }
+}
+
+async function observeMemoryV1(kind, options = {}) {
+  if (!config.memoryV1.enabled || !config.memoryV1.shadowEnabled) return;
+  const diagnostic = await memoryV1Shadow.observe(kind, options);
+  log('memory_v1_shadow_read', {
+    kind: diagnostic.kind,
+    status: diagnostic.status,
+    latencyMs: diagnostic.latencyMs,
+    resultCount: diagnostic.resultCount,
+    estimatedTokens: diagnostic.estimatedTokens,
+    truncated: diagnostic.truncated,
+    errorCode: diagnostic.errorCode,
+  });
+}
+
+async function composeMemoryV1Context(baseEnvelope, { sessionId, now, maxTokens, formal = false }) {
+  const result = await shadowContextComposition.compose({
+    baseEnvelope,
+    sessionId,
+    now,
+    maxTokens,
+  });
+  log(formal ? 'memory_v1_context_composed' : 'memory_v1_shadow_context_composed', result.diagnostic);
+  return result;
 }
 
 async function updateState(meta, mutate) {
@@ -171,6 +500,7 @@ async function runCycle() {
   if (cyclePromise) return cyclePromise;
   cyclePromise = (async () => {
     const now = new Date();
+    await settleMindV2Resonance(now, 'settle');
     await synchronizeOmbreHeartbeat();
     const driveBias = await personality.getDriveBias(now);
     let settled;
@@ -259,6 +589,12 @@ async function runCycle() {
     const proactiveContactIsIdle = contactIdleAllowed(state, now, config.heartbeat.proactiveMinIdleHours);
 
     if (config.dreamEnabled && dreamAllowed(state, now, config.dreamMinIntervalHours, config.dreamMaxPerDay)) {
+      if (!config.memoryV1.shadowContextEnabled) {
+        void observeMemoryV1('recentMaterial', {
+          dedupeKey: `dream:${now.toISOString()}`,
+          now,
+        });
+      }
       let material = '';
       let sourceOmbreBucketIds = [];
       if (!config.shadowMode && config.ombre.readEnabled) {
@@ -350,6 +686,12 @@ async function runCycle() {
     }
 
     if (!config.shadowMode && config.bark.enabled && proactiveContactIsIdle && !dreamCreated && proactiveBarkAllowed(state, now, config.bark.autonomousMinIntervalHours, config.bark.maxPerDay, config.bark.minDrive)) {
+      if (!config.memoryV1.shadowContextEnabled) {
+        void observeMemoryV1('thoughtMaterial', {
+          dedupeKey: `thought:${now.toISOString()}`,
+          now,
+        });
+      }
       let selected;
       let modelFailed = false;
       // 只取一次：selectUniqueBark 去重失败时会重试生成，材料跟着重取的话
@@ -541,6 +883,8 @@ async function runCycle() {
       }, (latest) => scheduleDaytimeEmergence(latest, now, config.daytime.minIntervalHours, config.daytime.maxIntervalHours));
       log('daytime_emergence_scheduled', { nextAt: state.nextDaytimeEmergenceAt, revision: state.revision });
     }
+    await settleMindV2Appraisals(now);
+    await settleMindV2OpenLoops(now);
     return { state, dreamCreated, barkSent, daytimeSent };
   })().finally(() => { cyclePromise = null; });
   return cyclePromise;
@@ -762,9 +1106,22 @@ async function createContextEnvelope({
   maxTokens = config.context.defaultMaxTokens,
   force = false,
   now = new Date(),
+  sourceOperation = '',
+  onRecallDeliveryDraft = null,
 }) {
   let state = await store.read();
   const delivery = contextDeliveryState(state, sessionId, mode, now, config.context.handoffOnceHours);
+  let mindV2Text = '';
+  if (
+    mindV2ProjectionEnabled
+    && sourceOperation === 'mcp:xinchao_context'
+    && (!delivery.alreadyDelivered || force)
+  ) {
+    await settleMindV2Appraisals(now);
+    await settleMindV2OpenLoops(now);
+    await settleMindV2Resonance(now, 'context');
+    mindV2Text = await composeMindV2Projection(now);
+  }
   let ombreText = '';
   let ombreWarning = '';
   if (
@@ -795,7 +1152,7 @@ async function createContextEnvelope({
   }
   let cabinRecent = 0;
   try { cabinRecent = (await cabin.unlockedUserNotes()).filter((n) => now.getTime() - Date.parse(n.createdAt) < 24 * 3_600_000).length; } catch { cabinRecent = 0; }
-  const envelope = buildContextEnvelope({
+  const baseEnvelope = buildContextEnvelope({
     awarenessReviewWeekday: config.awareness.reviewWeekday,
     state,
     sessionId,
@@ -805,6 +1162,7 @@ async function createContextEnvelope({
     awaySignals,
     cabinRecent,
     ombreText,
+    mindV2Text,
     maxTokens,
     ttlMinutes: config.context.ttlMinutes,
     now,
@@ -813,6 +1171,36 @@ async function createContextEnvelope({
     timeZone: config.settle.timeZone,
     personalityAnchors,
   });
+  let envelope = baseEnvelope;
+  if (baseEnvelope.delivered && mode === 'session_start') {
+    if (config.memoryV1.enabled && config.memoryV1.contextEnabled) {
+      const composition = await composeMemoryV1Context(baseEnvelope, {
+        sessionId,
+        now,
+        maxTokens,
+        formal: true,
+      });
+      envelope = promoteShadowContextCandidate(baseEnvelope, composition);
+      if (recallDeliveryReceiptsEnabled && sourceOperation === 'mcp:xinchao_context') {
+        const draft = createRecallDeliveryDraft({
+          composition,
+          sessionId,
+          contextDigest: envelope.digest,
+          deliveredAt: now,
+          sourceOperation,
+        });
+        if (draft && typeof onRecallDeliveryDraft === 'function') onRecallDeliveryDraft(draft);
+      }
+    } else if (config.memoryV1.enabled && config.memoryV1.shadowEnabled && config.memoryV1.shadowContextEnabled) {
+      void composeMemoryV1Context(baseEnvelope, { sessionId, now, maxTokens });
+    } else {
+      void observeMemoryV1('recentContinuityMaterial', {
+        dedupeKey: `context:${sessionId}`,
+        now,
+        maxTokens: config.context.ombreMaxTokens,
+      });
+    }
+  }
   if (envelope.delivered) {
     for (const sig of awaySignals) {
       try { await bridgeQueue.acknowledge(sig.id, 'delivered', '', now); } catch { /* 回执失败下次再带 */ }
@@ -916,6 +1304,7 @@ async function recordConversationEvent(event, source = 'api', now = new Date()) 
     });
     return applied.state;
   });
+  await registerRealEventForAppraisal(event, source, state, now);
   return {
     revision: state.revision,
     consciousness: state.consciousness,
@@ -1325,11 +1714,22 @@ const server = createServer(async (request, response) => {
       }
       const payload = await body(request);
       const sessionId = transportSessionId(request, payload?.method === 'initialize');
+      const formalContextRequest = payload?.method === 'tools/call'
+        && payload?.params?.name === 'xinchao_context';
+      if (!formalContextRequest || !mindV2ProjectionEnabled) {
+        await settleMindV2Resonance(new Date(), 'request');
+      }
+      let recallDeliveryDraft = null;
       const result = await handleMcpMessage(payload, {
         defaultSessionId: sessionId,
+        triggerPolicy: config.chatgptTrigger,
         context: async (args) => {
           if (!config.context.enabled) throw new Error('心潮 Context Envelope 当前未启用');
-          return createContextEnvelope(args);
+          return createContextEnvelope({
+            ...args,
+            sourceOperation: 'mcp:xinchao_context',
+            onRecallDeliveryDraft: (draft) => { recallDeliveryDraft = draft; },
+          });
         },
         event: async (event) => {
           // 硬门：他自己在窗口里直接填的类型，只认"自己动一下就能落"的四种；关系类要有她的话（exchange）为证
@@ -1390,6 +1790,12 @@ const server = createServer(async (request, response) => {
           if (stamped.stamped) log('ombre_emotion_stamped', { tool: String(name).slice(0, 40), ...stamped.coords });
           return ombre.call(name, stamped.args);
         },
+        appraisal: appraisalEnabled
+          ? async (operation) => recordAppraisalOperation(operation)
+          : undefined,
+        openLoop: openLoopEnabled
+          ? async (operation) => recordOpenLoopOperation(operation)
+          : undefined,
       });
       if (payload?.method === 'initialize' || payload?.method === 'tools/call') {
         log('mcp_request', {
@@ -1398,6 +1804,9 @@ const server = createServer(async (request, response) => {
           session: auditEventFingerprint(sessionId),
           status: result.status,
         });
+      }
+      if (recallDeliveryDraft && result.status === 200 && payload?.params?.name === 'xinchao_context') {
+        commitRecallDeliveryOnSuccessfulResponse(response, recallDeliveryDraft, recordRecallDelivery);
       }
       return sendMcp(response, result.status, result.body, {
         'Mcp-Session-Id': sessionId,
@@ -1482,7 +1891,7 @@ const server = createServer(async (request, response) => {
   }
 });
 
-server.listen(config.port, '0.0.0.0', async () => {
+server.listen(config.port, '127.0.0.1', async () => {
   await store.read();
   await cabin.init();
   await blackBox.init();
@@ -1499,7 +1908,99 @@ server.listen(config.port, '0.0.0.0', async () => {
     }
   } catch (error) { log('pending_migration_failed', { message: error.message }); }
   if (config.bridge.enabled) await bridgeQueue.init();
-  log('service_started', { port: config.port, shadow: config.shadowMode, modelEnabled: config.model.enabled, barkEnabled: config.bark.enabled, bridgeEnabled: config.bridge.enabled });
+  if (config.mindV2.storeEnabled) {
+    const result = await mindV2Store.initialize();
+    log('mind_v2_store_status', {
+      status: result.status,
+      digest: result.digest,
+      errorCode: result.errorCode,
+    });
+    if (appraisalEnabled && result.state) {
+      try {
+        let migration;
+        const migrated = await mindV2Store.update((mindState) => {
+          migration = initializeAppraisalState(mindState, new Date());
+          return migration.state;
+        });
+        log('mind_v2_appraisal_status', {
+          status: migration.changed ? 'migrated' : 'ready',
+          revision: migrated.revision,
+          appraisalCount: migrated.appraisals.length,
+          errorCode: null,
+        });
+        await settleMindV2Appraisals(new Date());
+      } catch (error) {
+        log('mind_v2_appraisal_status', {
+          status: 'omitted',
+          errorCode: mindV2ErrorCode(error),
+        });
+      }
+    }
+    if (openLoopEnabled && result.state) {
+      try {
+        let migration;
+        const migrated = await mindV2Store.update((mindState) => {
+          migration = initializeOpenLoopState(mindState, new Date());
+          return migration.state;
+        });
+        log('mind_v2_open_loop_status', {
+          status: migration.changed ? 'migrated' : 'ready',
+          revision: migrated.revision,
+          openLoopCount: migrated.openLoops.length,
+          errorCode: null,
+        });
+        await settleMindV2OpenLoops(new Date());
+      } catch (error) {
+        log('mind_v2_open_loop_status', {
+          status: 'omitted',
+          errorCode: openLoopErrorCode(error),
+        });
+      }
+    }
+    if (recallDeliveryReceiptsEnabled && result.state) {
+      try {
+        let migration;
+        const migrated = await mindV2Store.update((mindState) => {
+          migration = initializeRecallDeliveryState(mindState, new Date());
+          return migration.state;
+        });
+        log('mind_v2_recall_delivery_status', {
+          status: migration.changed ? 'migrated' : 'ready',
+          revision: migrated.revision,
+          receiptCount: migrated.recallDeliveryReceipts.length,
+          errorCode: null,
+        });
+      } catch (error) {
+        log('mind_v2_recall_delivery_status', {
+          status: 'omitted',
+          receiptCount: 0,
+          errorCode: recallDeliveryErrorCode(error),
+        });
+      }
+    }
+    if (memoryResonanceEnabled && result.state) {
+      try {
+        let migration;
+        const migrated = await mindV2Store.update((mindState) => {
+          migration = initializeMemoryResonanceState(mindState, new Date());
+          return migration.state;
+        });
+        log('mind_v2_memory_resonance_status', {
+          status: migration.changed ? 'migrated' : 'ready',
+          revision: migrated.revision,
+          activeCount: migrated.resonance.length,
+          errorCode: null,
+        });
+      } catch (error) {
+        log('mind_v2_memory_resonance_status', {
+          status: 'omitted',
+          activeCount: 0,
+          errorCode: resonanceErrorCode(error),
+        });
+      }
+    }
+  }
+  log('service_started', { port: config.port, shadow: config.shadowMode, modelEnabled: config.model.enabled, barkEnabled: config.bark.enabled, bridgeEnabled: config.bridge.enabled, mindV2Enabled: config.mindV2.storeEnabled });
 });
 
 const timer = setInterval(() => runCycle().catch((error) => log('cycle_failed', { message: error.message })), config.settleIntervalMinutes * 60_000);

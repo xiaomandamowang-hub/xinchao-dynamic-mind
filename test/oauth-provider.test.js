@@ -110,7 +110,7 @@ test('authorization code flow requires approval token and PKCE, then refreshes',
   const consent = response();
   await instance.handle(request('GET'), consent, authorizeUrl);
   assert.equal(consent.status, 200);
-  assert.match(consent.body, /心潮动态心智系统/);
+  assert.match(consent.body, /心潮念/);
   assert.doesNotMatch(consent.body, /correct-horse-battery-staple/);
   assert.match(consent.headers['Content-Security-Policy'], /form-action 'self' https:/);
 

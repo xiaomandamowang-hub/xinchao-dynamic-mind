@@ -199,6 +199,7 @@ export function buildContextEnvelope({
   sessionId,
   mode = 'session_start',
   ombreText = '',
+  mindV2Text = '',
   maxTokens = 2200,
   ttlMinutes = 15,
   now = new Date(),
@@ -266,6 +267,15 @@ export function buildContextEnvelope({
       data: { keys: anchors.map((anchor) => String(anchor.key ?? anchor.label)) },
     });
   }
+  const mindV2Projection = compact(mindV2Text);
+  if (mindV2Projection) {
+    sections.push({
+      id: 'mind_v2_projection',
+      source: 'mind-v2',
+      ttl: 'current',
+      content: mindV2Projection,
+    });
+  }
   // 自我觉察候选：系统从轨迹里挑出的模式，最多两条，确认或放下都由 AI 自己定。
   const awarenessText = renderAwareness(state, { now, timeZone, reviewWeekday: awarenessReviewWeekday });
   if (awarenessText) {
@@ -317,6 +327,7 @@ export function buildContextEnvelope({
 
   const labels = {
     dynamic_state: '心潮动态状态',
+    mind_v2_projection: 'Mind v2 当前主观状态',
     behavior_anchors: '行为锚点（我的底线，驱力再高也不越过）',
     self_awareness: '自我觉察候选（我最近的样子，不一定对）',
     while_away: '你不在的时候（心潮记下的我自己的信号）',

@@ -41,7 +41,7 @@ test('MCP initialize advertises the package-aligned tool server version', async 
   }, handlers());
   assert.equal(result.status, 200);
   assert.equal(result.body.result.protocolVersion, '2025-06-18');
-  assert.equal(result.body.result.serverInfo.name, 'xinchao-dynamic-mind');
+  assert.equal(result.body.result.serverInfo.name, '心潮念');
   assert.equal(result.body.result.serverInfo.version, SYSTEM_VERSION);
   assert.equal(result.body.result.capabilities.tools.listChanged, false);
 });
@@ -52,10 +52,10 @@ test('tools/list exposes context, event and short handoff note tools', async () 
     id: 2,
     method: 'tools/list',
   }, handlers());
-  assert.deepEqual(
-    result.body.result.tools.map((tool) => tool.name),
-    ['xinchao_context', 'xinchao_event', 'xinchao_handoff_note'],
-  );
+  const toolNames = result.body.result.tools.map((tool) => tool.name);
+  for (const required of ['xinchao_context', 'xinchao_event', 'xinchao_awareness', 'xinchao_handoff_note', 'xinchao_box', 'xinchao_personality_reflect']) {
+    assert.ok(toolNames.includes(required), `missing ${required}`);
+  }
   assert.equal(result.body.result.tools[0].annotations.readOnlyHint, true);
   assert.equal(result.body.result.tools[1].annotations.destructiveHint, false);
   assert.equal(result.body.result.tools[1].annotations.idempotentHint, true);
@@ -64,9 +64,10 @@ test('tools/list exposes context, event and short handoff note tools', async () 
   assert.ok(result.body.result.tools[1].inputSchema.required.includes('event_id'));
   assert.equal(result.body.result.tools[1].inputSchema.required.includes('session_id'), false);
   assert.ok(result.body.result.tools[1].inputSchema.properties.interaction_type.enum.includes('sharing'));
-  assert.equal(result.body.result.tools[2].annotations.idempotentHint, true);
+  const handoff = result.body.result.tools.find((tool) => tool.name === 'xinchao_handoff_note');
+  assert.equal(handoff.annotations.idempotentHint, true);
   assert.deepEqual(
-    result.body.result.tools[2].inputSchema.required,
+    handoff.inputSchema.required,
     ['event_id', 'note'],
   );
 });

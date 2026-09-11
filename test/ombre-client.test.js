@@ -37,25 +37,28 @@ test('strong drives bias what surfaces, and never gate it', async () => {
   assert.match(query, /没有直接相关的就照常返回近期重要的/);
 });
 
-test('weak drives leave the recall query untouched', async () => {
+test('daytime surfacing uses automatic recall without a synthetic query', async () => {
   const { client, calls } = readClient();
   const baseline = await readClient();
   await baseline.client.daytimeMaterial();
   await client.daytimeMaterial([{ key: 'crave', label: '渴求', value: 0.2 }]);
 
-  assert.equal(calls[0].args.query, baseline.calls[0].args.query);
-  assert.doesNotMatch(calls[0].args.query, /此刻最强的内在状态/);
+  assert.equal(calls[0].name, 'breath_advanced');
+  assert.equal(baseline.calls[0].args.query, undefined);
+  assert.equal(calls[0].args.query, undefined);
+  assert.equal(calls[0].args.mode, 'automatic');
 });
 
-test('autonomous thought recall stays smaller than daytime recall', async () => {
+test('autonomous thought recall uses the bounded automatic surfacing lane', async () => {
   const { client, calls } = readClient();
   await client.thoughtMaterial([{ key: 'crave', label: '渴求', value: 0.8 }]);
 
   const { args } = calls[0];
-  assert.equal(args.name ?? calls[0].name, 'breath');
+  assert.equal(args.name ?? calls[0].name, 'breath_advanced');
   assert.ok(args.max_results <= 3);
-  assert.ok(args.max_tokens <= 600);
-  assert.match(args.query, /渴求/);
+  assert.equal(args.max_tokens, 9000);
+  assert.equal(args.mode, 'automatic');
+  assert.equal(args.query, undefined);
 });
 
 test('automatic dream writes identify themselves and never impersonate manual memory', async () => {
@@ -67,9 +70,9 @@ test('automatic dream writes identify themselves and never impersonate manual me
     breathMaxResults: 3,
     breathMaxTokens: 800,
   });
-  let captured;
+  const captured = [];
   client.call = async (name, args) => {
-    captured = { name, args };
+    captured.push({ name, args });
     return { result: { content: [{ type: 'text', text: '已保存 abcdef123456' }] } };
   };
 
@@ -79,9 +82,11 @@ test('automatic dream writes identify themselves and never impersonate manual me
     awareness: '记得回来',
   });
 
-  assert.equal(captured.name, 'hold');
-  assert.equal(captured.args.auto, true);
-  assert.equal(captured.args.source, 'xinchao-dream');
-  assert.equal(captured.args.importance, 7);
-  assert.equal(captured.args.tags, 'dream');
+  assert.equal(captured[0].name, 'hold');
+  assert.equal(captured[0].args.auto, true);
+  assert.equal(captured[0].args.source, 'xinchao-dream');
+  assert.equal(captured[0].args.importance, 7);
+  assert.equal(captured[0].args.tags, 'dream');
+  assert.equal(captured[1].name, 'trace');
+  assert.equal(captured[1].args.dont_surface, 1);
 });

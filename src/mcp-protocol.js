@@ -448,6 +448,99 @@ const BOARD_READ_TOOL = {
   },
 };
 
+const APPRAISAL_TOOL = {
+  name: 'xinchao_appraisal',
+  title: '更新当前主观评价',
+  description: '仅在真实 xinchao_event 已成功落地、且形成明确主观理解时调用。它描述 AI 当前如何理解事件，不是记忆事实；不要提交聊天原文或 drive 数值。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      action: { type: 'string', enum: ['create', 'revise', 'release'] },
+      operation_id: { type: 'string', minLength: 1, maxLength: 120 },
+      source_event_id: { type: 'string', minLength: 1, maxLength: 120 },
+      subject_key: { type: 'string', minLength: 1, maxLength: 120 },
+      interpretation: { type: 'string', minLength: 1, maxLength: 480 },
+      valence: { type: 'number', minimum: -1, maximum: 1 },
+      relevance: { type: 'number', minimum: 0, maximum: 1 },
+      certainty: { type: 'number', minimum: 0, maximum: 1 },
+      controllability: { type: 'number', minimum: 0, maximum: 1 },
+      relational_meaning: { type: 'string', maxLength: 240 },
+      persistence_class: { type: 'string', enum: ['fleeting', 'situational', 'significant'] },
+    },
+    required: ['action', 'operation_id', 'source_event_id', 'subject_key'],
+    allOf: [{
+      if: { properties: { action: { enum: ['create', 'revise'] } } },
+      then: { required: ['interpretation', 'valence', 'relevance', 'certainty', 'controllability', 'persistence_class'] },
+    }],
+    additionalProperties: false,
+  },
+  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+};
+
+const OPEN_LOOP_TOOL = {
+  name: 'xinchao_open_loop',
+  title: '记录有边界的未完事项',
+  description: '仅在真实 xinchao_event 之后，确实留下关系、任务或共同计划的未完事项时调用。它是当前状态，不是长期记忆；resolve 需要后续真实事件，release 表示主动放下。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      action: { type: 'string', enum: ['open', 'resolve', 'release'] },
+      operation_id: { type: 'string', minLength: 1, maxLength: 120 },
+      source_event_id: { type: 'string', minLength: 1, maxLength: 120 },
+      loop_key: { type: 'string', minLength: 1, maxLength: 120 },
+      kind: { type: 'string', enum: ['relationship', 'task', 'shared_plan'] },
+      summary: { type: 'string', minLength: 1, maxLength: 280 },
+      expectation: { type: 'string', minLength: 1, maxLength: 280 },
+      related_memory_ids: { type: 'array', maxItems: 8, uniqueItems: true, items: { type: 'string', minLength: 1, maxLength: 160, pattern: '^[A-Za-z0-9._:-]+$' } },
+      priority: { type: 'string', enum: ['low', 'medium', 'high'] },
+      due_at: { type: 'string', format: 'date-time', maxLength: 40 },
+      closure_reason: { type: 'string', minLength: 1, maxLength: 240 },
+    },
+    required: ['action', 'operation_id', 'source_event_id', 'loop_key'],
+    allOf: [
+      { if: { properties: { action: { const: 'open' } } }, then: { required: ['kind', 'summary', 'expectation', 'priority'] } },
+      { if: { properties: { action: { enum: ['resolve', 'release'] } } }, then: { required: ['closure_reason'] } },
+    ],
+    additionalProperties: false,
+  },
+  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+};
+
+function triggerPolicyEnabled(policy = {}) {
+  return policy?.enabled === true;
+}
+
+function triggerPolicyInstructions(policy = {}) {
+  if (!triggerPolicyEnabled(policy)) return [];
+  const longGapHours = Math.max(1, Math.min(72, Number(policy.contextLongGapHours) || 6));
+  return [
+    '不要每轮机械调用心潮工具。',
+    `新聊天窗口首次响应前调用一次 xinchao_context；同一窗口仅在明确间隔至少 ${longGapHours} 小时且需要恢复连续性时再次调用。`,
+    '无法确定是否满足触发条件时，跳过调用。',
+  ];
+}
+
+function toolsForRuntime(handlers = {}) {
+  const tools = structuredClone(XINCHAO_TOOLS);
+  if (handlers.appraisal) tools.push(structuredClone(APPRAISAL_TOOL));
+  if (handlers.openLoop) tools.push(structuredClone(OPEN_LOOP_TOOL));
+  if (!triggerPolicyEnabled(handlers.triggerPolicy)) return tools;
+  const longGapHours = Math.max(1, Math.min(72, Number(handlers.triggerPolicy.contextLongGapHours) || 6));
+  const context = tools.find((tool) => tool.name === 'xinchao_context');
+  if (context) context.description += [
+    '触发策略：每个新聊天窗口首次响应前优先调用一次。',
+    `同一窗口仅在明确间隔至少 ${longGapHours} 小时、且需要恢复连续性时再次调用，并设置 force=true。`,
+    '普通连续对话、每轮回答、刚调用后或仅为检查状态时不要调用。',
+  ].join('');
+  const event = tools.find((tool) => tool.name === 'xinchao_event');
+  if (event) event.description += [
+    '触发策略：只在一次有意义互动已经明确完成后调用一次，不要在互动开始前预记。',
+    '问候、简短确认、普通追问、工具执行过程、失败或未完成的任务都不触发。',
+    'task_progress 仅用于完成了具体里程碑；不确定就不调用。',
+  ].join('');
+  return tools;
+}
+
 function response(id, result) {
   return { jsonrpc: '2.0', id, result };
 }
@@ -575,6 +668,24 @@ function personalityReflectArgs(args = {}) {
   };
 }
 
+function appraisalArgs(args = {}) {
+  return {
+    action: args.action, operationId: args.operation_id, sourceEventId: args.source_event_id,
+    subjectKey: args.subject_key, interpretation: args.interpretation, valence: args.valence,
+    relevance: args.relevance, certainty: args.certainty, controllability: args.controllability,
+    relationalMeaning: args.relational_meaning, persistenceClass: args.persistence_class,
+  };
+}
+
+function openLoopArgs(args = {}) {
+  return {
+    action: args.action, operationId: args.operation_id, sourceEventId: args.source_event_id,
+    loopKey: args.loop_key, kind: args.kind, summary: args.summary, expectation: args.expectation,
+    relatedMemoryIds: args.related_memory_ids, priority: args.priority, dueAt: args.due_at,
+    closureReason: args.closure_reason,
+  };
+}
+
 // 官方客户端没有钩子：每个 xinchao_* 工具的回应末尾挂一行"此刻"，他每调一次工具就拿到一次自己的状态。
 async function callTool(name, args, handlers) {
   const result = await callToolInner(name, args, handlers);
@@ -631,6 +742,14 @@ async function callToolInner(name, args, handlers) {
       `近期交接便签已接收：revision=${result.revision}${duplicate}`,
       result,
     );
+  }
+  if (name === 'xinchao_appraisal' && handlers.appraisal) {
+    const result = await handlers.appraisal(appraisalArgs(args));
+    return toolText(`Appraisal operation accepted: action=${result.action} revision=${result.revision}${result.duplicate ? ' duplicate=true' : ''}`, result);
+  }
+  if (name === 'xinchao_open_loop' && handlers.openLoop) {
+    const result = await handlers.openLoop(openLoopArgs(args));
+    return toolText(`Open Loop operation accepted: action=${result.action} revision=${result.revision}${result.duplicate ? ' duplicate=true' : ''}`, result);
   }
   if (name === 'xinchao_box') {
     if (!handlers.box) throw new Error('黑匣子未接入');
@@ -752,6 +871,9 @@ export async function handleMcpMessage(payload, handlers) {
           '每月由你自己调用 xinchao_personality_reflect 完成一次 14 维性格内核自评；人类不参与打分，同月结果不会被覆盖。',
           '用户开锁后可用 xinchao_cabin_inbox 读取小屋来信；上锁的正文不会返回。你想给用户留话时可用 xinchao_cabin_note。',
           '只有结果明确的真实互动才填写 interaction_type；不要提交聊天正文或欲望数值。',
+          ...(handlers.appraisal ? ['真实事件落地并形成明确主观理解后，才调用 xinchao_appraisal；it is current subjective meaning, not Memory fact.'] : []),
+          ...(handlers.openLoop ? ['真实事件留下有边界的未完事项后，才调用 xinchao_open_loop；it is current unfinished state, not Memory fact; release means deliberate letting go, not objective completion.'] : []),
+          ...triggerPolicyInstructions(handlers.triggerPolicy),
         ].join(''),
       }),
     };
@@ -762,7 +884,7 @@ export async function handleMcpMessage(payload, handlers) {
   if (method === 'tools/list') {
     const boardTools = handlers.boardEnabled ? [BOARD_POST_TOOL, BOARD_READ_TOOL] : [];
     const hidden = handlers.toolsHide instanceof Set ? handlers.toolsHide : new Set();
-    let tools = [...XINCHAO_TOOLS, ...boardTools].filter((tool) => !hidden.has(tool.name));
+    let tools = [...toolsForRuntime(handlers), ...boardTools].filter((tool) => !hidden.has(tool.name));
     try {
       if (handlers.listObTools) {
         const obTools = await handlers.listObTools();

@@ -42,7 +42,7 @@ test('transition journal stores structured deltas without private plaintext', as
   assert.equal(record.details.content, undefined);
   assert.equal(record.delta.driveDeltas.curiosity, 0.25);
   assert.doesNotMatch(raw, /私密正文|也不能进入日志/);
-  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  if (process.platform !== 'win32') assert.equal((await stat(path)).mode & 0o777, 0o600);
 });
 
 test('context audit records only digest and delivery metadata', async () => {
