@@ -67,10 +67,8 @@ export class DashboardAuth {
 
   validateRequest(request, now = new Date()) {
     if (!this.enabled) return false;
-    // 同源前端用 HttpOnly Cookie；浏览器直连（跨源）用不了 Cookie ——
-    // JS 设不了 Cookie 头，http 来源也存不下 Secure Cookie，所以同一套
-    // 会话 token 额外允许走 Authorization 头。两条通道的 token 完全一样，
-    // 都会过期、都能被 logout 撤销。
+    // 同源 Dashboard 使用 HttpOnly Cookie；跨源浏览器直连使用同一枚短期会话
+    // token 的 Authorization 通道。长期 Dashboard 口令仍然只能用于换取会话。
     const token = cookies(request.headers.cookie)[COOKIE_NAME]
       || (request.headers.authorization ?? '').replace(/^Bearer\s+/i, '').trim();
     if (!token) return false;
@@ -83,7 +81,6 @@ export class DashboardAuth {
   }
 
   destroyRequestSession(request) {
-    // 退出必须对两条通道都生效，否则直连模式退不掉。
     const token = cookies(request.headers.cookie)[COOKIE_NAME]
       || (request.headers.authorization ?? '').replace(/^Bearer\s+/i, '').trim();
     if (token) this.sessions.delete(digest(token));

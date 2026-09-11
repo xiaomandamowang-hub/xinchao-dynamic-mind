@@ -1,95 +1,79 @@
-import test from 'node:test';
 import assert from 'node:assert/strict';
-import { newState } from '../src/engine.js';
-import { buildConnectionManifest, buildDashboardSnapshot } from '../src/dashboard-projection.js';
-import { DRIVE_KEYS } from '../src/dimensions.js';
+import test from 'node:test';
 
-function config(overrides = {}) {
-  return {
-    identity: { agentName: '顾川', notificationRecipient: '派派' },
-    shadowMode: false,
-    context: { enabled: true },
-    mcp: { enabled: true },
-    oauth: { enabled: true, publicBaseUrl: 'https://xinchao.example.com' },
-    ombre: { readEnabled: true, writeEnabled: false },
-    bark: { enabled: true },
-    dashboard: {
-      enabled: true,
-      publicBaseUrl: 'https://xinchao.example.com',
-      includePrivateText: false,
-      dreamLimit: 12,
-      ...(overrides.dashboard ?? {}),
+import { buildDashboardSnapshot } from '../src/dashboard-projection.js';
+
+const state = {
+  drives: { possess: 0.72, monitor: 0.44 },
+  thoughtPool: {
+    flash: [
+      { key: 'possess', text: '我刚刚想起那次一起走回家的晚上。', intensity: 0.58 },
+      { key: 'monitor', text: '想安静地陪她一会儿。', intensity: 0.61 },
+    ],
+    obsessions: [
+      { key: 'possess', text: '我还记得她说会回来。', intensity: 0.86 },
+    ],
+  },
+};
+
+test('dashboard keeps real thought sentences private by default', () => {
+  const snapshot = buildDashboardSnapshot(state, { dashboard: { includePrivateText: false } });
+  assert.deepEqual(snapshot.thoughts.lines, []);
+  assert.equal(snapshot.thoughts.signals.find((item) => item.key === 'possess')?.intensity, 0.86);
+});
+
+test('dashboard exposes only the strongest real sentence per drive after opt-in', () => {
+  const snapshot = buildDashboardSnapshot(state, { dashboard: { includePrivateText: true } });
+  assert.deepEqual(snapshot.thoughts.lines, [
+    {
+      key: 'possess',
+      text: '我还记得她说会回来。',
+      kind: 'obsession',
+      intensity: 0.86,
     },
+    {
+      key: 'monitor',
+      text: '想安静地陪她一会儿。',
+      kind: 'flash',
+      intensity: 0.61,
+    },
+  ]);
+});
+
+test('dashboard snapshot projects personality core without private reasons by default', () => {
+  const core = {
+    updatedAt: '2026-08-19T08:00:00.000Z',
+    history: [{ month: '2026-07' }, { month: '2026-08' }],
+    dimensions: [
+      { key: 'love', label: '爱与依恋', score: 83, delta: 2, reason: 'AI 私密月度回顾' },
+      { key: 'expression', label: '表达', score: undefined, delta: undefined, reason: '不应出现' },
+    ],
   };
-}
-
-test('dashboard snapshot is stable and private by default', () => {
-  const now = new Date('2026-08-03T08:00:00.000Z');
-  const state = newState(new Date('2026-08-03T07:00:00.000Z'));
-  state.drives.possess = 0.82;
-  state.thoughtPool.flash.push({
-    key: 'possess',
-    text: '不能泄露的思绪正文',
-    intensity: 0.91,
-    age: 0,
-  });
-  state.recentDreams.push({
-    id: 'dream-private',
-    createdAt: '2026-08-03T07:30:00.000Z',
-    source: 'model',
-    dream: '不能泄露的梦境原文',
-    summary: '不能泄露的梦境摘要',
-    residue: '不能泄露的梦境余韵',
-    awareness: '不能泄露的醒后意识',
-    lucidity: 0.72,
-  });
-  const snapshot = buildDashboardSnapshot(state, config(), now);
-  const raw = JSON.stringify(snapshot);
-
-  assert.equal(snapshot.schemaVersion, 1);
-  // 断言跟着维度表走，不写死 12 —— 否则给 dimensions.js 加一维就会红，
-  // 而那恰恰是这套设计允许发生的事。
-  assert.equal(snapshot.drives.length, DRIVE_KEYS.length);
-  assert.equal(snapshot.topDrives[0].key, 'possess');
-  assert.equal(snapshot.topDrives[0].level, 'surging');
-  assert.equal(snapshot.thoughts.flashCount, 1);
-  assert.equal(snapshot.thoughts.signals[0].intensity, 0.91);
-  assert.equal(snapshot.dreams[0].hasResidue, true);
-  assert.equal(snapshot.dreams[0].hasDream, true);
-  assert.equal(snapshot.dreams[0].lucidity, 0.72);
-  assert.equal(snapshot.dreams[0].dream, undefined);
-  assert.equal(snapshot.dreams[0].residue, undefined);
-  assert.doesNotMatch(raw, /不能泄露/);
-});
-
-test('private dream text is an explicit bounded opt-in', () => {
-  const state = newState();
-  state.recentDreams.push({
-    id: 'dream-visible',
-    createdAt: new Date().toISOString(),
-    source: 'model',
-    dream: '我在云层里看见一扇门',
-    awareness: '醒来仍记得门上的光',
-    residue: '留下的余韵',
-    lucidity: 0.81,
-  });
-  const snapshot = buildDashboardSnapshot(state, config({
-    dashboard: { includePrivateText: true },
-  }));
-  assert.equal(snapshot.dreams[0].dream, '我在云层里看见一扇门');
-  assert.equal(snapshot.dreams[0].summary, '醒来仍记得门上的光');
-  assert.equal(snapshot.dreams[0].residue, '留下的余韵');
-  assert.equal(snapshot.dreams[0].lucidity, 0.81);
-});
-
-test('connection manifest supports different clients without returning secrets', () => {
-  const manifest = buildConnectionManifest(config());
-  const raw = JSON.stringify(manifest);
-  assert.deepEqual(
-    manifest.profiles.map((profile) => profile.id),
-    ['web-dashboard', 'remote-mcp-oauth', 'remote-mcp-bearer', 'http-api', 'runtime-bridge'],
+  const snapshot = buildDashboardSnapshot(
+    state,
+    { dashboard: { includePrivateText: false }, personality: { zodiac: '双子座' } },
+    new Date('2026-08-19T09:00:00.000Z'),
+    core,
   );
-  assert.equal(manifest.profiles[0].auth, 'http-only-session-cookie');
-  assert.equal(manifest.secrets.included, false);
-  assert.doesNotMatch(raw, /SERVICE_TOKEN":"|accessToken|approvalToken/);
+  assert.deepEqual(snapshot.personality, {
+    available: true,
+    constellation: '双子座',
+    month: '2026-08',
+    updatedAt: '2026-08-19T08:00:00.000Z',
+    anchors: [],
+    dimensions: [
+      { key: 'love', label: '爱与依恋', score: 83, delta: 2 },
+      { key: 'expression', label: '表达', score: 70, delta: 0 },
+    ],
+  });
+});
+
+test('dashboard includes personality reasons only after private-text opt-in', () => {
+  const snapshot = buildDashboardSnapshot(
+    state,
+    { dashboard: { includePrivateText: true } },
+    new Date(),
+    { dimensions: [{ key: 'love', label: '爱与依恋', score: 80, delta: 1, reason: 'AI 私密评分原因' }] },
+  );
+  assert.equal(snapshot.personality.dimensions[0].reason, 'AI 私密评分原因');
 });

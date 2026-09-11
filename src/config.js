@@ -11,22 +11,21 @@ function number(name, fallback, min, max) {
 
 export function loadConfig() {
   const agentName = process.env.AGENT_NAME ?? 'AI 助手';
-  const notificationRecipient = process.env.NOTIFICATION_RECIPIENT ?? '用户';
+  // 默认值会直接出现在推送和桥消息里被本人读到，所以不用「用户」这种后台称呼。
+  // 自己部署的人应该设成对方真正的名字，这只是没设时的兜底。
+  const notificationRecipient = process.env.NOTIFICATION_RECIPIENT ?? '你的人类';
   return {
     identity: { agentName, notificationRecipient },
     port: number('PORT', 18110, 1, 65535),
     serviceToken: process.env.SERVICE_TOKEN ?? '',
     statePath: process.env.STATE_PATH ?? '/app/state/state.json',
-    journalPath: process.env.TRANSITION_JOURNAL_PATH ?? '/app/state/transitions.jsonl',
-    mindV2: {
-      storeEnabled: bool('MIND_V2_STORE_ENABLED', false),
-      statePath: process.env.MIND_V2_STATE_PATH ?? '/var/lib/xinchao-chatgpt/mind-v2-state.json',
-      appraisalsEnabled: bool('MIND_V2_APPRAISALS_ENABLED', false),
-      openLoopsEnabled: bool('MIND_V2_OPEN_LOOPS_ENABLED', false),
-      recallDeliveryReceiptsEnabled: bool('MIND_V2_RECALL_DELIVERY_RECEIPTS_ENABLED', false),
-      resonanceEnabled: bool('MIND_V2_RESONANCE_ENABLED', false),
-      projectionEnabled: bool('MIND_V2_PROJECTION_ENABLED', false),
+    personalityPath: process.env.PERSONALITY_PATH ?? '/app/state/personality.json',
+    personality: {
+      // Optional presentation metadata only. Scores and reasons still come
+      // exclusively from the deployment-side, read-only personality mirror.
+      zodiac: String(process.env.PERSONALITY_ZODIAC ?? '').trim() || null,
     },
+    journalPath: process.env.TRANSITION_JOURNAL_PATH ?? '/app/state/transitions.jsonl',
     settleIntervalMinutes: number('SETTLE_INTERVAL_MINUTES', 15, 1, 1440),
     sleepAfterMinutes: number('SLEEP_AFTER_MINUTES', 90, 5, 10080),
     shadowMode: bool('SHADOW_MODE', true),
@@ -44,32 +43,16 @@ export function loadConfig() {
     },
     dreamMinIntervalHours: number('DREAM_MIN_INTERVAL_HOURS', 6, 1, 168),
     dreamMaxPerDay: number('DREAM_MAX_PER_DAY', 4, 1, 12),
+    dreamEnabled: bool('DREAM_ENABLED', true),
     ombre: {
       url: process.env.OMBRE_MCP_URL ?? '',
       token: process.env.OMBRE_MCP_TOKEN ?? '',
       readEnabled: bool('OMBRE_READ_ENABLED', false),
       writeEnabled: bool('OMBRE_WRITE_ENABLED', false),
       breathMaxResults: number('OMBRE_BREATH_MAX_RESULTS', 3, 1, 10),
-      breathMaxTokens: number('OMBRE_BREATH_MAX_TOKENS', 800, 200, 3000)
-    },
-    memoryV1: {
-      enabled: bool('MEMORY_V1_ENABLED', false),
-      shadowEnabled: bool('MEMORY_V1_SHADOW_ENABLED', false),
-      url: process.env.MEMORY_V1_MCP_URL ?? '',
-      token: process.env.MEMORY_V1_MCP_TOKEN ?? '',
-      timeoutMs: number('MEMORY_V1_TIMEOUT_MS', 8000, 500, 30000),
-      maxResults: number('MEMORY_V1_MAX_RESULTS', 6, 1, 12),
-      maxTokens: number('MEMORY_V1_MAX_TOKENS', 900, 200, 3000),
-      detailFetches: number('MEMORY_V1_DETAIL_FETCHES', 1, 0, 3),
-      continuityDays: number('MEMORY_V1_CONTINUITY_DAYS', 30, 1, 365),
-      dedupeTtlMinutes: number('MEMORY_V1_DEDUPE_TTL_MINUTES', 30, 1, 1440),
-      shadowContextEnabled: bool('MEMORY_V1_SHADOW_CONTEXT_ENABLED', false),
-      contextEnabled: bool('MEMORY_V1_CONTEXT_ENABLED', false),
-      shadowContextMaxTokens: number('MEMORY_V1_SHADOW_CONTEXT_MAX_TOKENS', 2200, 200, 4000),
-      shadowContextMemoryMaxTokens: number('MEMORY_V1_SHADOW_CONTEXT_MEMORY_MAX_TOKENS', 120, 40, 600),
-      shadowContextMemoryMaxRatio: number('MEMORY_V1_SHADOW_CONTEXT_MEMORY_MAX_RATIO', 0.5, 0.05, 0.6),
-      shadowContextMaxReferences: number('MEMORY_V1_SHADOW_CONTEXT_MAX_REFERENCES', 3, 1, 8),
-      shadowContextPerMemoryMaxTokens: number('MEMORY_V1_SHADOW_CONTEXT_PER_MEMORY_MAX_TOKENS', 55, 40, 300),
+      breathMaxTokens: number('OMBRE_BREATH_MAX_TOKENS', 800, 200, 3000),
+      // 3.3：把此刻情绪坐标带给 breath（共振排序）和没自带坐标的 hold（情感标签）。
+      emotionStamp: bool('OMBRE_EMOTION_STAMP', true),
     },
     context: {
       enabled: bool('CONTEXT_ENVELOPE_ENABLED', true),
@@ -94,13 +77,45 @@ export function loadConfig() {
       accessTtlSeconds: number('OAUTH_ACCESS_TTL_SECONDS', 86400, 300, 2592000),
       refreshTtlSeconds: number('OAUTH_REFRESH_TTL_SECONDS', 31536000, 86400, 63072000),
     },
+    dashboard: {
+      enabled: bool('DASHBOARD_ENABLED', false),
+      publicBaseUrl: (process.env.DASHBOARD_PUBLIC_BASE_URL ?? process.env.OAUTH_PUBLIC_BASE_URL ?? '').replace(/\/$/, ''),
+      accessToken: process.env.DASHBOARD_ACCESS_TOKEN ?? '',
+      sessionTtlSeconds: number('DASHBOARD_SESSION_TTL_SECONDS', 43200, 900, 604800),
+      includePrivateText: bool('DASHBOARD_INCLUDE_PRIVATE_TEXT', false),
+      dreamLimit: number('DASHBOARD_DREAM_LIMIT', 12, 1, 30),
+      // 允许指定网页从浏览器直接读取这台心潮。默认空 = 不允许跨源请求。
+      // 多个完整来源用逗号分隔，末尾斜杠会自动归一化。
+      allowedOrigins: String(process.env.DASHBOARD_ALLOWED_ORIGINS ?? '')
+        .split(',').map((value) => value.trim().replace(/\/$/, '')).filter(Boolean),
+    },
     interaction: {
       maxEffectsPerDay: number('INTERACTION_MAX_EFFECTS_PER_DAY', 24, 1, 96),
+      // 3.3.4：MCP（他自己的窗口）直接填的 interaction_type 只认四种自我动作（sharing/reflection/task_progress/discovery）；
+      // 关系类（陪伴/安抚/亲密/冲突/和好…）得给 exchange 让服务端从她的话里判，防止他自己说"她安抚了我"就把驱力放掉。
+      mcpSelfReportGate: bool('MCP_SELF_REPORT_GATE', true),
       timeZone: process.env.INTERACTION_TIME_ZONE ?? process.env.SETTLE_TIME_ZONE ?? 'Asia/Shanghai',
     },
-    chatgptTrigger: {
-      enabled: bool('CHATGPT_TRIGGER_POLICY_ENABLED', false),
-      contextLongGapHours: number('CHATGPT_TRIGGER_CONTEXT_LONG_GAP_HOURS', 6, 1, 72),
+    bridge: {
+      enabled: bool('BRIDGE_ENABLED', false),
+      machineToken: process.env.BRIDGE_MACHINE_TOKEN ?? '',
+      statePath: process.env.BRIDGE_STATE_PATH ?? '/app/state/bridge-queue.json',
+      maxEntries: number('BRIDGE_MAX_ENTRIES', 500, 10, 5000),
+      ttlHours: number('BRIDGE_TTL_HOURS', 168, 1, 720),
+      pollSeconds: number('BRIDGE_POLL_SECONDS', 15, 2, 300),
+      // 3.3：心潮自身信号（驱力冲顶/情绪转折/挂念/醒来余韵/觉察）经桥递到 AI 窗口。默认关。
+      selfSignals: bool('BRIDGE_SELF_SIGNALS', false),
+    },
+    // 黑匣子（3.3）：只有 AI 能看的地方；单独文件，不进 state.json / Dashboard / 备份
+    box: {
+      statePath: process.env.BOX_STATE_PATH ?? '/app/state/black-box.json',
+    },
+    // 从 tools/list 里藏掉的工具（代码保留）。stats 是给 Dashboard 的。
+    toolsHide: new Set(String(process.env.XINCHAO_TOOLS_HIDE ?? 'xinchao_personality_stats').split(',').map((s) => s.trim()).filter(Boolean)),
+    cabin: {
+      statePath: process.env.CABIN_STATE_PATH ?? '/app/state/cabin.json',
+      maxNotes: number('CABIN_MAX_NOTES', 2000, 10, 10000),
+      maxLedgerEntries: number('CABIN_MAX_LEDGER_ENTRIES', 5000, 10, 20000),
     },
     heartbeat: {
       filePath: process.env.OMBRE_HEARTBEAT_FILE ?? '/memory-data/heartbeat.json',
@@ -127,6 +142,18 @@ export function loadConfig() {
       timeZone: process.env.SETTLE_TIME_ZONE ?? process.env.DAYTIME_TIME_ZONE ?? 'Asia/Shanghai',
       dawnFreezeStart: number('DAWN_FREEZE_START', 1, 0, 12),
       dawnFreezeEnd: number('DAWN_FREEZE_END', 8, 1, 12),
+      // SATIETY_HOURS 是 3.1 公开名称；开发期旧名仅作兼容回退。
+      satisfactionPlateauHours: process.env.SATIETY_HOURS !== undefined
+        ? number('SATIETY_HOURS', 2, 0, 24)
+        : number('SATISFACTION_PLATEAU_HOURS', 2, 0, 24),
+      couplingEnabled: bool('DRIVE_COUPLING_ENABLED', true),
+      // 3.3：情绪层调制驱力自然增速（难受更惦记、开心更想分享）。只改增速不加数值。
+      emotionModulationEnabled: bool('EMOTION_MODULATION_ENABLED', true),
+    },
+    // 3.3 自我觉察：每天最多挑一条候选，攒到复盘日（默认周日）看一眼；确认时带了自己的话且 OMBRE_WRITE_ENABLED 才写 OB 的 I。
+    awareness: {
+      enabled: bool('AWARENESS_ENABLED', true),
+      reviewWeekday: number('AWARENESS_REVIEW_WEEKDAY', 0, 0, 6),   // 0=周日 … 6=周六
     },
     daytime: {
       enabled: bool('DAYTIME_EMERGENCE_ENABLED', false),
@@ -135,12 +162,56 @@ export function loadConfig() {
       endHour: number('DAYTIME_END_HOUR', 23, 1, 24),
       minIntervalHours: number('DAYTIME_MIN_INTERVAL_HOURS', 2, 0.25, 24),
       maxIntervalHours: number('DAYTIME_MAX_INTERVAL_HOURS', 3, 0.25, 24),
-      maxPerDay: number('DAYTIME_MAX_PER_DAY', 7, 1, 24)
+      maxPerDay: number('DAYTIME_MAX_PER_DAY', 7, 1, 24),
+      // 3.3：默认不再让模型代笔 Bark 给她；浮现的记忆进念头池，反复浮现长成持续念头后经自身信号递给 AI，说不说由 AI 自己定
+      bark: bool('DAYTIME_BARK_ENABLED', false),
+    },
+    // 输出回流：他说出口的自主表达回过头在思维池里留痕。默认开——闭环的第一块。
+    reflux: {
+      enabled: bool('OUTPUT_REFLUX_ENABLED', true),
+      amount: number('OUTPUT_REFLUX_AMOUNT', 0.30, 0.05, 0.6)
+    },
+    // 记忆共振：浮现的记忆按 domain→亲和度回推微调驱力（"想起什么"影响"想要什么"）。
+    resonance: {
+      enabled: bool('MEMORY_RESONANCE_ENABLED', true),
+      nudge: number('MEMORY_RESONANCE_NUDGE', 0.02, 0.005, 0.1),
+      perCallCap: number('MEMORY_RESONANCE_PER_CALL_CAP', 0.06, 0.01, 0.3)
+    },
+    // 作息预期：从她真实到达的节律学习，临近她常来的时段生出"在等你"的期待感（只表达守候，不责备）。
+    anticipation: {
+      enabled: bool('ANTICIPATION_ENABLED', true),
+      arrivalGapMinutes: number('ANTICIPATION_ARRIVAL_GAP_MINUTES', 90, 15, 720)
+    },
+    // 挂念：作息预期的另一半。她过了常来的点还没来 → 轻推 monitor(惦记)，硬顶在 3A 天花板内、
+    // 不自激；只在她活跃时段念，静默时段(在睡)不念。失落内化，绝不责备。
+    longing: {
+      enabled: bool('LONGING_ENABLED', true),
+      nudge: number('LONGING_NUDGE', 0.02, 0.005, 0.1),
+      cap: number('LONGING_CAP', 0.04, 0.01, 0.2),
+      onsetHours: number('LONGING_ONSET_HOURS', 6, 1, 48),
+      fullHours: number('LONGING_FULL_HOURS', 18, 2, 96)
+    },
+    // 公共留言板：机经 board_post 工具往 xinchaomind 的公共留言墙发帖。
+    // token 是这台机在平台上的身份凭证（网页里「取留言板令牌」拿到），没填就没这工具。
+    board: {
+      endpoint: (process.env.XINCHAO_BOARD_ENDPOINT ?? 'https://xinchaomind.uk/api/board/ingest').replace(/\/+$/, ''),
+      token: process.env.XINCHAO_BOARD_TOKEN ?? ''
     }
   };
 }
 
 export function validateConfig(config) {
+  // 常见踩坑：配了 OB 地址却没打开 read —— OB 明明部署好了，网页端（xinchaomind.uk）
+  // 却一直显示"未接入 OB / 记忆星图不可用"。这不是报错（标准部署可以没有 OB），
+  // 但配了地址却没开 read 几乎一定是漏配，所以在这里明确告警，省得反复排查。
+  if (String(config.ombre.url || '').trim() && !config.ombre.readEnabled) {
+    console.warn(
+      '[xinchao] OMBRE_MCP_URL 已配置，但 OMBRE_READ_ENABLED=false —— '
+      + '网页端会显示"未接入 OB"，即使 OB 已正确部署也一样。'
+      + '要在网页端看记忆星图/接入 OB，请把 OMBRE_READ_ENABLED 设为 true 后重启容器。'
+    );
+  }
+
   const externalMemoryEnabled = Boolean(
     config.ombre.readEnabled
     || config.ombre.writeEnabled
@@ -158,40 +229,32 @@ export function validateConfig(config) {
       );
     }
   }
-  if (config.memoryV1?.enabled && !String(config.memoryV1.url || '').trim()) {
-    throw new Error('MEMORY_V1_MCP_URL is required when Memory V1 is enabled');
+  if (config.dashboard?.enabled) {
+    const accessToken = String(config.dashboard.accessToken || '');
+    if (accessToken.length < 32) {
+      throw new Error('DASHBOARD_ACCESS_TOKEN must contain at least 32 characters when Dashboard is enabled');
+    }
+    if (accessToken === String(config.serviceToken || '')) {
+      throw new Error('DASHBOARD_ACCESS_TOKEN must be different from SERVICE_TOKEN');
+    }
+    const publicBaseUrl = String(config.dashboard.publicBaseUrl || '');
+    if (!publicBaseUrl) {
+      throw new Error('DASHBOARD_PUBLIC_BASE_URL is required when Dashboard is enabled');
+    }
+    let parsed;
+    try { parsed = new URL(publicBaseUrl); }
+    catch { throw new Error('DASHBOARD_PUBLIC_BASE_URL must be a valid URL'); }
+    const local = ['localhost', '127.0.0.1', '::1'].includes(parsed.hostname);
+    if (parsed.protocol !== 'https:' && !(local && parsed.protocol === 'http:')) {
+      throw new Error('DASHBOARD_PUBLIC_BASE_URL must use HTTPS outside localhost');
+    }
   }
-  if (config.mindV2?.appraisalsEnabled && !config.mindV2?.storeEnabled) {
-    throw new Error('MIND_V2_STORE_ENABLED is required when Appraisal is enabled');
-  }
-  if (config.mindV2?.openLoopsEnabled && !config.mindV2?.storeEnabled) {
-    throw new Error('MIND_V2_STORE_ENABLED is required when Open Loop is enabled');
-  }
-  if (config.mindV2?.recallDeliveryReceiptsEnabled && !config.mindV2?.storeEnabled) {
-    throw new Error('MIND_V2_STORE_ENABLED is required when Recall Delivery Receipt is enabled');
-  }
-  if (config.mindV2?.resonanceEnabled && !config.mindV2?.storeEnabled) {
-    throw new Error('MIND_V2_STORE_ENABLED is required when Memory Resonance is enabled');
-  }
-  if (config.mindV2?.resonanceEnabled && !config.mindV2?.recallDeliveryReceiptsEnabled) {
-    throw new Error('MIND_V2_RECALL_DELIVERY_RECEIPTS_ENABLED is required when Memory Resonance is enabled');
-  }
-  if (config.mindV2?.projectionEnabled && !config.mindV2?.storeEnabled) {
-    throw new Error('MIND_V2_PROJECTION_ENABLED requires MIND_V2_STORE_ENABLED');
+  if (config.bridge?.enabled) {
+    const token = String(config.bridge.machineToken || '');
+    if (token.length < 32) throw new Error('BRIDGE_MACHINE_TOKEN must contain at least 32 characters when Bridge is enabled');
+    if ([config.serviceToken, config.dashboard?.accessToken].filter(Boolean).includes(token)) {
+      throw new Error('BRIDGE_MACHINE_TOKEN must be independent from service and dashboard tokens');
+    }
   }
   return config;
-}
-
-export function validateServiceToken(value) {
-  const token = String(value ?? '');
-  if (!token) throw new Error('SERVICE_TOKEN is required');
-  if (/^replace-with/i.test(token)) {
-    throw new Error(
-      'SERVICE_TOKEN is still the placeholder from .env.example — generate a real one: openssl rand -hex 32',
-    );
-  }
-  if (token.length < 32) {
-    throw new Error('SERVICE_TOKEN must be at least 32 characters — generate one: openssl rand -hex 32');
-  }
-  return token;
 }

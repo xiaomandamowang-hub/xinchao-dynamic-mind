@@ -1,4 +1,7 @@
 import { DIMENSIONS, DRIVE_KEYS } from './dimensions.js';
+import { buildConnectionDiagnostics } from './connection-diagnostics.js';
+import { emotionSummary } from './emotion.js';
+import { awarenessSummary } from './awareness.js';
 
 const clamp = (value, min = 0, max = 1) => Math.max(min, Math.min(max, Number(value) || 0));
 
@@ -31,7 +34,7 @@ function projectedDrives(state) {
   });
 }
 
-function projectedThoughts(state) {
+function projectedThoughts(state, includePrivateText = false) {
   const flash = Array.isArray(state?.thoughtPool?.flash) ? state.thoughtPool.flash : [];
   const obsessions = Array.isArray(state?.thoughtPool?.obsessions) ? state.thoughtPool.obsessions : [];
   const signals = [...flash, ...obsessions].reduce((result, item) => {
@@ -39,6 +42,21 @@ function projectedThoughts(state) {
     result[item.key] = Math.max(result[item.key] ?? 0, clamp(item.intensity));
     return result;
   }, {});
+  const lines = includePrivateText
+    ? [...flash.map((item) => ({ ...item, kind: 'flash' })), ...obsessions.map((item) => ({ ...item, kind: 'obsession' }))]
+      .filter((item) => DRIVE_KEYS.includes(item?.key) && compact(item?.text))
+      .sort((left, right) => clamp(right.intensity) - clamp(left.intensity))
+      .reduce((result, item) => {
+        if (result.some((existing) => existing.key === item.key)) return result;
+        result.push({
+          key: item.key,
+          text: compact(item.text, 280),
+          kind: item.kind,
+          intensity: Number(clamp(item.intensity).toFixed(4)),
+        });
+        return result;
+      }, [])
+    : [];
   return {
     flashCount: flash.length,
     obsessionCount: obsessions.length,
@@ -46,6 +64,7 @@ function projectedThoughts(state) {
       key,
       intensity: Number(intensity.toFixed(4)),
     })),
+    lines,
   };
 }
 
@@ -66,7 +85,10 @@ function projectedDreams(state, includePrivateText, limit = 12) {
       hasSummary: Boolean(summary),
       hasAwareness: Boolean(compact(dream?.awareness)),
       lucidity,
+      // 3.3：醒来心情公开（只是两个数），意象随正文挂私密门
+      mood: dream?.mood && Number.isFinite(Number(dream.mood.valence)) ? { valence: Number(clamp(dream.mood.valence).toFixed(3)), arousal: Number(clamp(dream.mood.arousal).toFixed(3)) } : null,
       ...(includePrivateText ? {
+        image: compact(dream?.image, 24) || null,
         dream: compact(dream?.dream, 4000) || null,
         summary,
         residue: compact(dream?.residue, 1200) || null,
@@ -83,7 +105,34 @@ function activeSessionCount(state, now) {
   }).length;
 }
 
-export function buildDashboardSnapshot(state = {}, config = {}, now = new Date()) {
+function projectedPersonality(core = {}, config = {}) {
+  const dimensions = Array.isArray(core?.dimensions) ? core.dimensions : [];
+  const history = Array.isArray(core?.history) ? core.history : [];
+  const includePrivateText = Boolean(config.dashboard?.includePrivateText);
+  return {
+    available: dimensions.length > 0,
+    constellation: compact(config.personality?.zodiac, 40) || null,
+    month: compact(core?.month ?? history.at(-1)?.month, 7) || null,
+    updatedAt: validDate(core?.updatedAt),
+    ...(includePrivateText && core?.periodSummary ? { periodSummary: compact(core.periodSummary, 1500) } : {}),
+    // 行为锚点：label 是身份宣言可默认展示；description 更私密，挂 includePrivateText 门。
+    anchors: (Array.isArray(core?.anchors) ? core.anchors : []).map((anchor) => ({
+      key: compact(anchor?.key, 60),
+      label: compact(anchor?.label, 40),
+      addedAt: validDate(anchor?.addedAt),
+      ...(includePrivateText ? { description: compact(anchor?.description, 300) } : {}),
+    })).filter((anchor) => anchor.label),
+    dimensions: dimensions.map((dimension) => ({
+      key: compact(dimension?.key, 80),
+      label: compact(dimension?.label, 80),
+      score: Number.isFinite(Number(dimension?.score)) ? Number(dimension.score) : 70,
+      delta: Number.isFinite(Number(dimension?.delta)) ? Number(dimension.delta) : 0,
+      ...(includePrivateText ? { reason: compact(dimension?.reason, 1200) } : {}),
+    })).filter((dimension) => dimension.key || dimension.label),
+  };
+}
+
+export function buildDashboardSnapshot(state = {}, config = {}, now = new Date(), personalityCore = {}) {
   const generatedAt = new Date(now);
   const drives = projectedDrives(state);
   const lastPresenceAt = validDate(state.lastHeartbeatAt ?? state.lastConversationAt);
@@ -116,7 +165,23 @@ export function buildDashboardSnapshot(state = {}, config = {}, now = new Date()
     },
     drives,
     topDrives,
-    thoughts: projectedThoughts(state),
+    // 情绪层（3.3）：此刻的心情，和驱力分开。成因是互动类型名，不含正文。
+    emotion: {
+      ...emotionSummary(state, generatedAt),
+      journal: (Array.isArray(state.emotionJournal) ? state.emotionJournal : []).slice(-48),
+      days: state.emotionDays && typeof state.emotionDays === 'object' ? state.emotionDays : {},
+    },
+    personality: projectedPersonality(personalityCore, config),
+    // 自我觉察（3.3）：候选与已确认，文本是关于 AI 自己的模式描述，不含对话正文。
+    awareness: awarenessSummary(state),
+    // 心潮自身信号（3.3）：他不在窗口时心潮记下并递出去的那几句。只有类型、时间和那一句，没有正文以外的东西。
+    signals: (() => {
+      const history = Array.isArray(state.selfSignals?.history) ? state.selfSignals.history : [];
+      const recent = history.slice(-20).reverse().map((item) => ({ kind: compact(item?.kind, 40), subject: compact(item?.subject, 40), text: compact(item?.text, 80) || null, at: validDate(item?.at) }));
+      const dayAgo = generatedAt.getTime() - 24 * 3_600_000;
+      return { last24h: history.filter((item) => Date.parse(item?.at ?? '') >= dayAgo).length, recent };
+    })(),
+    thoughts: projectedThoughts(state, Boolean(config.dashboard?.includePrivateText)),
     dreams: projectedDreams(
       state,
       Boolean(config.dashboard?.includePrivateText),
@@ -137,39 +202,44 @@ export function buildDashboardSnapshot(state = {}, config = {}, now = new Date()
       wakeBridgeProtocol: Boolean(config.bridge?.enabled),
       privateDreamText: Boolean(config.dashboard?.includePrivateText),
     },
+    connections: buildConnectionDiagnostics(config),
   };
 }
 
 export function buildConnectionManifest(config = {}) {
-  const dashboardBaseUrl = String(config.dashboard?.publicBaseUrl || config.oauth?.publicBaseUrl || '').replace(/\/$/, '');
-  const mcpBaseUrl = String(config.oauth?.publicBaseUrl || config.dashboard?.publicBaseUrl || '').replace(/\/$/, '');
+  // Dashboard and MCP may share a host, but their settings and credentials are
+  // independent. Never fall back from one base URL to the other: that hides
+  // incomplete configuration and encourages users to paste the wrong address.
+  const dashboardBaseUrl = String(config.dashboard?.publicBaseUrl || '').replace(/\/$/, '');
+  const mcpBaseUrl = String(config.oauth?.publicBaseUrl || '').replace(/\/$/, '');
   return {
     schemaVersion: 1,
     system: 'xinchao-dynamic-mind',
     publicBaseUrl: dashboardBaseUrl || mcpBaseUrl || null,
+    connections: buildConnectionDiagnostics(config),
     profiles: [
       {
         id: 'web-dashboard',
         audience: ['desktop-browser', 'mobile-browser', 'self-hosted-frontend'],
-        enabled: Boolean(config.dashboard?.enabled),
+        enabled: Boolean(config.dashboard?.enabled && dashboardBaseUrl),
         auth: 'http-only-session-cookie',
-        endpoint: dashboardBaseUrl ? `${dashboardBaseUrl}/dashboard/session` : '/dashboard/session',
+        endpoint: dashboardBaseUrl ? `${dashboardBaseUrl}/dashboard/session` : null,
         note: '网页只提交一次 Dashboard 访问口令；服务密钥不会进入浏览器。',
       },
       {
         id: 'remote-mcp-oauth',
         audience: ['claude', 'chatgpt', 'gemini', 'oauth-capable-ai'],
-        enabled: Boolean(config.mcp?.enabled && config.oauth?.enabled),
+        enabled: Boolean(config.mcp?.enabled && config.oauth?.enabled && mcpBaseUrl),
         auth: 'oauth-2.1-pkce',
-        endpoint: mcpBaseUrl ? `${mcpBaseUrl}/mcp` : '/mcp',
+        endpoint: mcpBaseUrl ? `${mcpBaseUrl}/mcp` : null,
         note: '优先用于支持远程 MCP 与 OAuth 的网页 AI。',
       },
       {
         id: 'remote-mcp-bearer',
         audience: ['claude-code', 'codex', 'ide', 'agent-runtime'],
-        enabled: Boolean(config.mcp?.enabled),
+        enabled: Boolean(config.mcp?.enabled && mcpBaseUrl),
         auth: 'bearer-token',
-        endpoint: mcpBaseUrl ? `${mcpBaseUrl}/mcp` : '/mcp',
+        endpoint: mcpBaseUrl ? `${mcpBaseUrl}/mcp` : null,
         note: 'Bearer 仅放在本地配置或服务器环境变量中。',
       },
       {

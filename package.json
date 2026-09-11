@@ -1,14 +1,12 @@
 {
   "name": "xinchao-dynamic-mind",
-  "version": "2.3.4",
+  "version": "3.3.5",
   "description": "Independent dynamic state engine with remote MCP, OAuth, short-term continuity and optional memory adapters.",
   "type": "module",
   "license": "MIT",
   "scripts": {
     "start": "node src/server.js",
-    "test": "node --test",
-    "smoke:memory-v1": "node scripts/smoke-memory-v1.js",
-    "evaluate:shadow-context": "node scripts/evaluate-shadow-context.js"
+    "test": "node --test"
   },
   "engines": {
     "node": ">=20"
