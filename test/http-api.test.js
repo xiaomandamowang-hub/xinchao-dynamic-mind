@@ -6,10 +6,8 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-
-// 断言跟着维度表走，不写死 12 —— 给 dimensions.js 加一维不该让测试变红。
-import { DRIVE_KEYS } from '../src/dimensions.js';
 import test from 'node:test';
+import { SYSTEM_VERSION } from '../src/version.js';
 
 const projectDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const serverPath = join(projectDir, 'src', 'server.js');
@@ -40,12 +38,29 @@ async function waitForHealth(baseUrl, child, output) {
   throw new Error(`等待心潮测试服务启动超时：${output.value}`);
 }
 
+for (const [label, token, pattern] of [
+  ['placeholder', 'replace-with-a-random-secret', /still the placeholder/],
+  ['short', 'short-service-token', /at least 32 characters/],
+]) {
+  test(`server refuses a ${label} SERVICE_TOKEN before startup`, async () => {
+    const child = spawn(process.execPath, [serverPath], {
+      cwd: projectDir,
+      env: { ...process.env, SERVICE_TOKEN: token },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let output = '';
+    child.stdout.on('data', (chunk) => { output += chunk; });
+    child.stderr.on('data', (chunk) => { output += chunk; });
+    const [code] = await once(child, 'exit');
+    assert.notEqual(code, 0);
+    assert.match(output, pattern);
+  });
+}
+
 test('POST /v1/handoff-note stores a bounded idempotent note for HTTP clients', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'xinchao-http-api-'));
   const port = await freePort();
   const token = 'http-api-test-token-0123456789abcdef';
-  const dashboardToken = 'dashboard-http-test-token-32-characters';
-  const bridgeToken = 'bridge-http-test-token-32-characters';
   const baseUrl = `http://127.0.0.1:${port}`;
   const output = { value: '' };
   const child = spawn(process.execPath, [serverPath], {
@@ -66,12 +81,6 @@ test('POST /v1/handoff-note stores a bounded idempotent note for HTTP clients', 
       CONTEXT_OMBRE_ENABLED: 'false',
       MCP_ENABLED: 'false',
       OAUTH_ENABLED: 'false',
-      DASHBOARD_ENABLED: 'true',
-      DASHBOARD_ACCESS_TOKEN: dashboardToken,
-      DASHBOARD_PUBLIC_BASE_URL: baseUrl,
-      BRIDGE_ENABLED: 'true',
-      BRIDGE_MACHINE_TOKEN: bridgeToken,
-      BRIDGE_STATE_PATH: join(directory, 'bridge-queue.json'),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -87,6 +96,8 @@ test('POST /v1/handoff-note stores a bounded idempotent note for HTTP clients', 
   });
 
   await waitForHealth(baseUrl, child, output);
+  const health = await fetch(`${baseUrl}/health`);
+  assert.equal((await health.json()).version, SYSTEM_VERSION);
   const note = 'HTTP 客户端的近期进度';
 
   const heartbeat = await fetch(`${baseUrl}/v1/heartbeat`, {
@@ -162,124 +173,4 @@ test('POST /v1/handoff-note stores a bounded idempotent note for HTTP clients', 
   const envelope = await context.json();
   assert.ok(envelope.sections.some((section) => section.id === 'handoff_notes'));
   assert.match(envelope.additionalContext, /HTTP 客户端的近期进度/);
-
-  const dashboardUnauthorized = await fetch(`${baseUrl}/dashboard/api/snapshot`);
-  assert.equal(dashboardUnauthorized.status, 401);
-
-  const badLogin = await fetch(`${baseUrl}/dashboard/session`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ access_token: 'wrong' }),
-  });
-  assert.equal(badLogin.status, 401);
-
-  const login = await fetch(`${baseUrl}/dashboard/session`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ access_token: dashboardToken }),
-  });
-  assert.equal(login.status, 200);
-  const cookie = login.headers.get('set-cookie');
-  assert.match(cookie, /xinchao_dashboard=/);
-  assert.match(cookie, /HttpOnly/);
-
-  const dashboardSnapshot = await fetch(`${baseUrl}/dashboard/api/snapshot`, {
-    headers: { cookie },
-  });
-  assert.equal(dashboardSnapshot.status, 200);
-  const snapshot = await dashboardSnapshot.json();
-  assert.equal(snapshot.system, 'xinchao-dynamic-mind');
-  assert.equal(snapshot.drives.length, DRIVE_KEYS.length);
-  assert.equal(snapshot.capabilities.privateDreamText, false);
-  assert.doesNotMatch(JSON.stringify(snapshot), /HTTP 客户端的近期进度/);
-
-  const directNumericMutation = await fetch(`${baseUrl}/dashboard/api/interactions`, {
-    method: 'POST',
-    headers: { cookie, 'content-type': 'application/json' },
-    body: JSON.stringify({
-      event_id: 'dashboard-forbidden-1',
-      interaction_type: 'affection',
-      driveDeltas: { possess: -1 },
-    }),
-  });
-  assert.equal(directNumericMutation.status, 400);
-
-  const interactionRequest = () => fetch(`${baseUrl}/dashboard/api/interactions`, {
-    method: 'POST',
-    headers: { cookie, 'content-type': 'application/json' },
-    body: JSON.stringify({
-      event_id: 'dashboard-affection-1',
-      interaction_type: 'affection',
-    }),
-  });
-  const interaction = await interactionRequest();
-  assert.equal(interaction.status, 200);
-  const interactionResult = await interaction.json();
-  assert.equal(interactionResult.interaction.type, 'affection');
-  assert.equal(interactionResult.interaction.applied, true);
-  assert.deepEqual(interactionResult.interaction.affectedDrives, ['possess', 'crave', 'monitor']);
-  assert.equal(interactionResult.bridge.queued, true);
-
-  const bridgeUnauthorized = await fetch(`${baseUrl}/bridge/v1/health`);
-  assert.equal(bridgeUnauthorized.status, 401);
-  const bridgeHeaders = { authorization: `Bearer ${bridgeToken}` };
-  const bridgeHealth = await fetch(`${baseUrl}/bridge/v1/health`, { headers: bridgeHeaders });
-  assert.deepEqual(await bridgeHealth.json(), { protocol: 'xinchao-bridge-server/1', status: 'ok' });
-  const bridgeDelivery = await fetch(`${baseUrl}/bridge/v1/deliveries/${interactionResult.bridge.deliveryId}`, { headers: bridgeHeaders });
-  assert.equal(bridgeDelivery.status, 200);
-  const runtimeEnvelope = await bridgeDelivery.json();
-  assert.equal(runtimeEnvelope.protocol, 'xinchao-runtime-wake/1');
-  assert.equal(runtimeEnvelope.reason, 'user_interaction');
-  assert.match(runtimeEnvelope.message, /拥抱/);
-  const bridgeAck = await fetch(`${baseUrl}/bridge/v1/deliveries/${interactionResult.bridge.deliveryId}/ack`, {
-    method: 'POST',
-    headers: { ...bridgeHeaders, 'content-type': 'application/json' },
-    body: JSON.stringify({ status: 'delivered' }),
-  });
-  assert.equal(bridgeAck.status, 200);
-  assert.equal((await bridgeAck.json()).status, 'delivered');
-
-  const duplicateInteraction = await interactionRequest();
-  assert.equal(duplicateInteraction.status, 200);
-  const duplicateResult = await duplicateInteraction.json();
-  assert.equal(duplicateResult.duplicate, true);
-  assert.equal(duplicateResult.interaction.reasonCode, 'duplicate_event');
-  assert.equal(duplicateResult.bridge, null);
-
-  const userNote = await fetch(`${baseUrl}/dashboard/api/bridge/deliveries`, {
-    method: 'POST',
-    headers: { cookie, 'content-type': 'application/json' },
-    body: JSON.stringify({
-      event_id: 'dashboard-note-0001',
-      message: '我晚一点回来，先帮我记着。',
-    }),
-  });
-  assert.equal(userNote.status, 201);
-  const noteResult = await userNote.json();
-  const noteEnvelopeResponse = await fetch(`${baseUrl}/bridge/v1/deliveries/${noteResult.deliveryId}`, { headers: bridgeHeaders });
-  const noteEnvelope = await noteEnvelopeResponse.json();
-  assert.equal(noteEnvelope.reason, 'user_note');
-  assert.equal(noteEnvelope.message, '我晚一点回来，先帮我记着。');
-
-  const serviceSnapshot = await fetch(`${baseUrl}/v1/dashboard/snapshot`, {
-    headers: { authorization: `Bearer ${token}` },
-  });
-  assert.equal(serviceSnapshot.status, 200);
-
-  const timeline = await fetch(`${baseUrl}/dashboard/api/timeline?limit=10`, {
-    headers: { cookie },
-  });
-  assert.equal(timeline.status, 200);
-  const timelineResult = await timeline.json();
-  assert.ok(timelineResult.items.some((item) => item.type === 'handoff_note'));
-  assert.doesNotMatch(JSON.stringify(timelineResult), /HTTP 客户端的近期进度/);
-
-  const manifest = await fetch(`${baseUrl}/dashboard/api/connect`, {
-    headers: { cookie },
-  });
-  assert.equal(manifest.status, 200);
-  const manifestResult = await manifest.json();
-  assert.equal(manifestResult.profiles.find((item) => item.id === 'web-dashboard').enabled, true);
-  assert.doesNotMatch(JSON.stringify(manifestResult), new RegExp(token));
-  assert.doesNotMatch(JSON.stringify(manifestResult), new RegExp(dashboardToken));
 });

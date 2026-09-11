@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { handleMcpMessage } from '../src/mcp-protocol.js';
+import { SYSTEM_VERSION } from '../src/version.js';
 
 function handlers() {
   return {
@@ -31,7 +32,7 @@ function handlers() {
   };
 }
 
-test('MCP initialize advertises the 2.4.0 tool server', async () => {
+test('MCP initialize advertises the package-aligned tool server version', async () => {
   const result = await handleMcpMessage({
     jsonrpc: '2.0',
     id: 1,
@@ -41,7 +42,7 @@ test('MCP initialize advertises the 2.4.0 tool server', async () => {
   assert.equal(result.status, 200);
   assert.equal(result.body.result.protocolVersion, '2025-06-18');
   assert.equal(result.body.result.serverInfo.name, 'xinchao-dynamic-mind');
-  assert.equal(result.body.result.serverInfo.version, '2.4.0');
+  assert.equal(result.body.result.serverInfo.version, SYSTEM_VERSION);
   assert.equal(result.body.result.capabilities.tools.listChanged, false);
 });
 
@@ -68,6 +69,47 @@ test('tools/list exposes context, event and short handoff note tools', async () 
     result.body.result.tools[2].inputSchema.required,
     ['event_id', 'note'],
   );
+});
+
+test('enabled ChatGPT trigger policy advertises sparse context and event conditions', async () => {
+  const policyHandlers = {
+    ...handlers(),
+    triggerPolicy: { enabled: true, contextLongGapHours: 6 },
+  };
+  const initialized = await handleMcpMessage({
+    jsonrpc: '2.0',
+    id: 21,
+    method: 'initialize',
+    params: { protocolVersion: '2025-06-18' },
+  }, policyHandlers);
+  assert.match(initialized.body.result.instructions, /不要每轮机械调用/);
+  assert.match(initialized.body.result.instructions, /至少 6 小时/);
+
+  const listed = await handleMcpMessage({
+    jsonrpc: '2.0',
+    id: 22,
+    method: 'tools\/list',
+  }, policyHandlers);
+  const context = listed.body.result.tools.find((tool) => tool.name === 'xinchao_context');
+  const event = listed.body.result.tools.find((tool) => tool.name === 'xinchao_event');
+  assert.match(context.description, /新聊天窗口首次响应前优先调用一次/);
+  assert.match(context.description, /普通连续对话.*不要调用/);
+  assert.match(event.description, /问候、简短确认、普通追问/);
+  assert.match(event.description, /task_progress 仅用于完成了具体里程碑/);
+  assert.match(event.description, /不确定就不调用/);
+});
+
+test('disabled ChatGPT trigger policy preserves the Mind Base v1 tool contract', async () => {
+  const listed = await handleMcpMessage({
+    jsonrpc: '2.0',
+    id: 23,
+    method: 'tools\/list',
+  }, {
+    ...handlers(),
+    triggerPolicy: { enabled: false, contextLongGapHours: 6 },
+  });
+  assert.doesNotMatch(listed.body.result.tools[0].description, /触发策略/);
+  assert.doesNotMatch(listed.body.result.tools[1].description, /触发策略/);
 });
 
 test('xinchao_context returns injectable text and structured envelope', async () => {
@@ -177,4 +219,181 @@ test('initialized notification uses an empty 202 response', async () => {
   }, handlers());
   assert.equal(result.status, 202);
   assert.equal(result.body, null);
+});
+
+test('Appraisal tool is feature-gated and exposes no drive or free-TTL input', async () => {
+  const enabledHandlers = {
+    ...handlers(),
+    appraisal: async (operation) => ({
+      revision: 3,
+      action: operation.action,
+      duplicate: false,
+      appraisal: { id: 'appraisal-1', status: 'active', version: 1 },
+      received: operation,
+    }),
+  };
+  const listed = await handleMcpMessage({
+    jsonrpc: '2.0', id: 30, method: 'tools/list',
+  }, enabledHandlers);
+  const tool = listed.body.result.tools.find((item) => item.name === 'xinchao_appraisal');
+  assert.ok(tool);
+  assert.equal(tool.annotations.idempotentHint, true);
+  assert.deepEqual(tool.inputSchema.properties.persistence_class.enum, [
+    'fleeting', 'situational', 'significant',
+  ]);
+  assert.equal('drive_delta' in tool.inputSchema.properties, false);
+  assert.equal('ttl' in tool.inputSchema.properties, false);
+  assert.equal('ttl_hours' in tool.inputSchema.properties, false);
+  assert.deepEqual(tool.inputSchema.required, [
+    'action', 'operation_id', 'source_event_id', 'subject_key',
+  ]);
+  assert.ok(tool.inputSchema.allOf[0].then.required.includes('interpretation'));
+  assert.ok(tool.inputSchema.allOf[0].then.required.includes('persistence_class'));
+
+  const initialized = await handleMcpMessage({
+    jsonrpc: '2.0', id: 31, method: 'initialize', params: { protocolVersion: '2025-06-18' },
+  }, enabledHandlers);
+  assert.match(initialized.body.result.instructions, /not Memory fact/);
+});
+
+test('xinchao_appraisal passes only its bounded semantic contract', async () => {
+  let received;
+  const result = await handleMcpMessage({
+    jsonrpc: '2.0',
+    id: 32,
+    method: 'tools/call',
+    params: {
+      name: 'xinchao_appraisal',
+      arguments: {
+        action: 'create',
+        operation_id: 'appraisal-operation-1',
+        source_event_id: 'real-event-1',
+        subject_key: 'relationship:trust',
+        interpretation: 'The interaction currently feels reparative.',
+        valence: 0.4,
+        relevance: 0.8,
+        certainty: 0.6,
+        controllability: 0.3,
+        relational_meaning: 'Trust may be returning.',
+        persistence_class: 'situational',
+        drive_delta: { anger: -1 },
+        chat_plaintext: 'must not pass',
+        ttl_hours: 999,
+      },
+    },
+  }, {
+    ...handlers(),
+    appraisal: async (operation) => {
+      received = operation;
+      return {
+        revision: 3,
+        action: operation.action,
+        duplicate: false,
+        appraisal: { id: 'appraisal-1', status: 'active', version: 1 },
+      };
+    },
+  });
+  assert.equal(result.body.result.isError, false);
+  assert.equal(received.operationId, 'appraisal-operation-1');
+  assert.equal(received.sourceEventId, 'real-event-1');
+  assert.equal(received.relationalMeaning, 'Trust may be returning.');
+  assert.equal('drive_delta' in received, false);
+  assert.equal('chat_plaintext' in received, false);
+  assert.equal('ttl_hours' in received, false);
+  assert.doesNotMatch(result.body.result.content[0].text, /reparative|Trust may be returning/);
+});
+
+test('Open Loop tool is feature-gated and exposes only bounded lifecycle input', async () => {
+  const disabled = await handleMcpMessage({
+    jsonrpc: '2.0', id: 40, method: 'tools/list',
+  }, handlers());
+  assert.equal(
+    disabled.body.result.tools.some((item) => item.name === 'xinchao_open_loop'),
+    false,
+  );
+
+  const enabledHandlers = {
+    ...handlers(),
+    openLoop: async (operation) => ({
+      revision: 5,
+      action: operation.action,
+      duplicate: false,
+      openLoop: { id: 'loop-1', status: 'open', version: 1 },
+    }),
+  };
+  const listed = await handleMcpMessage({
+    jsonrpc: '2.0', id: 41, method: 'tools/list',
+  }, enabledHandlers);
+  const tool = listed.body.result.tools.find((item) => item.name === 'xinchao_open_loop');
+  assert.ok(tool);
+  assert.equal(tool.annotations.idempotentHint, true);
+  assert.deepEqual(tool.inputSchema.properties.kind.enum, [
+    'relationship', 'task', 'shared_plan',
+  ]);
+  assert.deepEqual(tool.inputSchema.properties.priority.enum, ['low', 'medium', 'high']);
+  assert.equal(tool.inputSchema.properties.related_memory_ids.maxItems, 8);
+  assert.equal('drive_delta' in tool.inputSchema.properties, false);
+  assert.equal('ttl' in tool.inputSchema.properties, false);
+  assert.equal('ttl_days' in tool.inputSchema.properties, false);
+  assert.deepEqual(tool.inputSchema.required, [
+    'action', 'operation_id', 'source_event_id', 'loop_key',
+  ]);
+  assert.ok(tool.inputSchema.allOf[0].then.required.includes('summary'));
+  assert.ok(tool.inputSchema.allOf[1].then.required.includes('closure_reason'));
+
+  const initialized = await handleMcpMessage({
+    jsonrpc: '2.0', id: 42, method: 'initialize', params: { protocolVersion: '2025-06-18' },
+  }, enabledHandlers);
+  assert.match(initialized.body.result.instructions, /not Memory fact/);
+  assert.match(initialized.body.result.instructions, /release means deliberate letting go/i);
+});
+
+test('xinchao_open_loop passes only its bounded semantic contract', async () => {
+  let received;
+  const result = await handleMcpMessage({
+    jsonrpc: '2.0',
+    id: 43,
+    method: 'tools/call',
+    params: {
+      name: 'xinchao_open_loop',
+      arguments: {
+        action: 'open',
+        operation_id: 'open-loop-operation-1',
+        source_event_id: 'real-event-2',
+        loop_key: 'project:open-loop',
+        kind: 'task',
+        summary: 'The bounded slice remains unfinished.',
+        expectation: 'Complete and verify the slice.',
+        related_memory_ids: ['mem_reference_1'],
+        priority: 'high',
+        due_at: '2026-09-01T12:00:00.000Z',
+        drive_delta: { attachment: 1 },
+        chat_plaintext: 'must not pass',
+        ttl_days: 999,
+      },
+    },
+  }, {
+    ...handlers(),
+    openLoop: async (operation) => {
+      received = operation;
+      return {
+        revision: 5,
+        action: operation.action,
+        duplicate: false,
+        openLoop: { id: 'loop-1', status: 'open', version: 1 },
+      };
+    },
+  });
+  assert.equal(result.body.result.isError, false);
+  assert.equal(received.operationId, 'open-loop-operation-1');
+  assert.equal(received.sourceEventId, 'real-event-2');
+  assert.equal(received.loopKey, 'project:open-loop');
+  assert.deepEqual(received.relatedMemoryIds, ['mem_reference_1']);
+  assert.equal('drive_delta' in received, false);
+  assert.equal('chat_plaintext' in received, false);
+  assert.equal('ttl_days' in received, false);
+  assert.doesNotMatch(
+    result.body.result.content[0].text,
+    /bounded slice remains|Complete and verify|mem_reference/,
+  );
 });

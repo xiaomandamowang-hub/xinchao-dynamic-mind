@@ -1,3 +1,5 @@
+import { SYSTEM_VERSION } from './version.js';
+
 const SUPPORTED_PROTOCOLS = new Set(['2025-03-26', '2025-06-18']);
 const INTERACTION_TYPES = new Set([
   'companionship',
@@ -173,6 +175,145 @@ export const XINCHAO_TOOLS = [
   },
 ];
 
+const APPRAISAL_TOOL = {
+  name: 'xinchao_appraisal',
+  title: '更新当前主观评价',
+  description: [
+    '仅在一次真实 xinchao_event 已成功落地、且形成了明确主观理解时调用。',
+    'xinchao_event 描述发生了什么；本工具只描述沈归现在如何理解它。',
+    '不提交聊天原文，不提交 drive 数值。没有形成明确评价时完全不要调用。',
+    'create/revise 需要完整评价字段；release 只结束当前评价。',
+  ].join(''),
+  inputSchema: {
+    type: 'object',
+    properties: {
+      action: { type: 'string', enum: ['create', 'revise', 'release'] },
+      operation_id: { type: 'string', minLength: 1, maxLength: 120 },
+      source_event_id: { type: 'string', minLength: 1, maxLength: 120 },
+      subject_key: { type: 'string', minLength: 1, maxLength: 120 },
+      interpretation: { type: 'string', minLength: 1, maxLength: 480 },
+      valence: { type: 'number', minimum: -1, maximum: 1 },
+      relevance: { type: 'number', minimum: 0, maximum: 1 },
+      certainty: { type: 'number', minimum: 0, maximum: 1 },
+      controllability: { type: 'number', minimum: 0, maximum: 1 },
+      relational_meaning: { type: 'string', maxLength: 240 },
+      persistence_class: {
+        type: 'string',
+        enum: ['fleeting', 'situational', 'significant'],
+      },
+    },
+    required: ['action', 'operation_id', 'source_event_id', 'subject_key'],
+    allOf: [{
+      if: { properties: { action: { enum: ['create', 'revise'] } } },
+      then: {
+        required: [
+          'interpretation',
+          'valence',
+          'relevance',
+          'certainty',
+          'controllability',
+          'persistence_class',
+        ],
+      },
+    }],
+    additionalProperties: false,
+  },
+  annotations: {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+  },
+};
+
+const OPEN_LOOP_TOOL = {
+  name: 'xinchao_open_loop',
+  title: 'Track a bounded unresolved matter',
+  description: [
+    'Use only after a real xinchao_event has landed and that interaction leaves a relationship matter, task, or shared plan genuinely unresolved.',
+    'Open Loop is current unfinished state, not Memory fact and not a permanent attachment.',
+    'Do not submit chat plaintext or drive values. Memory recall, dreams, thoughts, shadow, and tests cannot create or reopen a loop.',
+    'open creates a bounded loop; resolve requires a later real event proving completion; release means Shen Gui deliberately lets go and does not claim objective completion.',
+  ].join(' '),
+  inputSchema: {
+    type: 'object',
+    properties: {
+      action: { type: 'string', enum: ['open', 'resolve', 'release'] },
+      operation_id: { type: 'string', minLength: 1, maxLength: 120 },
+      source_event_id: { type: 'string', minLength: 1, maxLength: 120 },
+      loop_key: { type: 'string', minLength: 1, maxLength: 120 },
+      kind: { type: 'string', enum: ['relationship', 'task', 'shared_plan'] },
+      summary: { type: 'string', minLength: 1, maxLength: 280 },
+      expectation: { type: 'string', minLength: 1, maxLength: 280 },
+      related_memory_ids: {
+        type: 'array',
+        maxItems: 8,
+        uniqueItems: true,
+        items: { type: 'string', minLength: 1, maxLength: 160, pattern: '^[A-Za-z0-9._:-]+$' },
+      },
+      priority: { type: 'string', enum: ['low', 'medium', 'high'] },
+      due_at: { type: 'string', format: 'date-time', maxLength: 40 },
+      closure_reason: { type: 'string', minLength: 1, maxLength: 240 },
+    },
+    required: ['action', 'operation_id', 'source_event_id', 'loop_key'],
+    allOf: [
+      {
+        if: { properties: { action: { const: 'open' } } },
+        then: { required: ['kind', 'summary', 'expectation', 'priority'] },
+      },
+      {
+        if: { properties: { action: { enum: ['resolve', 'release'] } } },
+        then: { required: ['closure_reason'] },
+      },
+    ],
+    additionalProperties: false,
+  },
+  annotations: {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+  },
+};
+
+function triggerPolicyEnabled(policy = {}) {
+  return policy?.enabled === true;
+}
+
+function toolsForTriggerPolicy(policy = {}, appraisalEnabled = false, openLoopEnabled = false) {
+  const tools = structuredClone(XINCHAO_TOOLS);
+  if (appraisalEnabled) tools.push(structuredClone(APPRAISAL_TOOL));
+  if (openLoopEnabled) tools.push(structuredClone(OPEN_LOOP_TOOL));
+  if (!triggerPolicyEnabled(policy)) return tools;
+  const longGapHours = Math.max(1, Math.min(72, Number(policy.contextLongGapHours) || 6));
+  const context = tools.find((tool) => tool.name === 'xinchao_context');
+  context.description += [
+    '触发策略：每个新聊天窗口首次响应前优先调用一次。',
+    `同一窗口仅在明确间隔至少 ${longGapHours} 小时、且需要恢复连续性时再次调用，并设置 force=true。`,
+    '普通连续对话、每轮回答、刚调用后或仅为检查状态时不要调用。',
+  ].join('');
+  const event = tools.find((tool) => tool.name === 'xinchao_event');
+  event.description += [
+    '触发策略：只在一次有意义互动已经明确完成后调用一次，不要在互动开始前预记。',
+    '问候、简短确认、普通追问、工具执行过程、失败或未完成的任务、以及每轮机械记录都不触发。',
+    'companionship 仅用于形成了持续陪伴的交流；task_progress 仅用于完成了具体里程碑；',
+    'reflection 仅用于完成了实质沉淀；conflict 仅用于真实冲突；reconciliation 仅用于此前冲突已明确和解。',
+    '其他允许类型也必须是已经完成且结果清楚的真实互动；不确定就不调用。',
+  ].join('');
+  return tools;
+}
+
+function triggerPolicyInstructions(policy = {}) {
+  if (!triggerPolicyEnabled(policy)) return [];
+  const longGapHours = Math.max(1, Math.min(72, Number(policy.contextLongGapHours) || 6));
+  return [
+    '不要每轮机械调用心潮工具。',
+    `新聊天窗口首次响应前调用一次 xinchao_context；同一窗口仅在明确间隔至少 ${longGapHours} 小时且需要恢复连续性时再次调用。`,
+    '仅在有意义互动已经完成且结果明确时调用一次 xinchao_event；问候、简短确认、普通追问、执行过程和未完成任务不触发。',
+    '无法确定是否满足触发条件时，跳过调用。',
+  ];
+}
+
 function response(id, result) {
   return { jsonrpc: '2.0', id, result };
 }
@@ -262,6 +403,38 @@ function handoffNoteArgs(args = {}, fallbackSessionId = '') {
   };
 }
 
+function appraisalArgs(args = {}) {
+  return {
+    action: args.action,
+    operationId: args.operation_id,
+    sourceEventId: args.source_event_id,
+    subjectKey: args.subject_key,
+    interpretation: args.interpretation,
+    valence: args.valence,
+    relevance: args.relevance,
+    certainty: args.certainty,
+    controllability: args.controllability,
+    relationalMeaning: args.relational_meaning,
+    persistenceClass: args.persistence_class,
+  };
+}
+
+function openLoopArgs(args = {}) {
+  return {
+    action: args.action,
+    operationId: args.operation_id,
+    sourceEventId: args.source_event_id,
+    loopKey: args.loop_key,
+    kind: args.kind,
+    summary: args.summary,
+    expectation: args.expectation,
+    relatedMemoryIds: args.related_memory_ids,
+    priority: args.priority,
+    dueAt: args.due_at,
+    closureReason: args.closure_reason,
+  };
+}
+
 async function callTool(name, args, handlers) {
   const fallbackSessionId = handlers.defaultSessionId ?? '';
   if (name === 'xinchao_context') {
@@ -290,6 +463,22 @@ async function callTool(name, args, handlers) {
       result,
     );
   }
+  if (name === 'xinchao_appraisal' && handlers.appraisal) {
+    const result = await handlers.appraisal(appraisalArgs(args));
+    const duplicate = result.duplicate ? ' duplicate=true' : '';
+    return toolText(
+      `Appraisal operation accepted: action=${result.action} revision=${result.revision}${duplicate}`,
+      result,
+    );
+  }
+  if (name === 'xinchao_open_loop' && handlers.openLoop) {
+    const result = await handlers.openLoop(openLoopArgs(args));
+    const duplicate = result.duplicate ? ' duplicate=true' : '';
+    return toolText(
+      `Open Loop operation accepted: action=${result.action} revision=${result.revision}${duplicate}`,
+      result,
+    );
+  }
   throw new Error(`未知工具：${name}`);
 }
 
@@ -305,6 +494,7 @@ export async function handleMcpMessage(payload, handlers) {
     return { status: 202, body: null };
   }
   if (method === 'initialize') {
+    const triggerInstructions = triggerPolicyInstructions(handlers.triggerPolicy);
     return {
       status: 200,
       body: response(id, {
@@ -313,13 +503,23 @@ export async function handleMcpMessage(payload, handlers) {
         serverInfo: {
           name: 'xinchao-dynamic-mind',
           title: '心潮动态心智系统',
-          version: '2.4.0',
+          version: SYSTEM_VERSION,
         },
         instructions: [
           '新窗口开始时调用 xinchao_context；服务端会绑定当前 MCP 连接，无需自行编写 session_id。',
           '一次实际互动后可调用 xinchao_event 更新窗口短状态；event_id 必须唯一，重试时复用。',
           '需要换窗续接时可调用 xinchao_handoff_note 保存近期进度摘要；不要提交聊天原文或人物基岩。',
           '只有结果明确的真实互动才填写 interaction_type；不要提交聊天正文或欲望数值。',
+          ...(handlers.appraisal ? [
+            'Only call xinchao_appraisal after a real xinchao_event has landed and a clear subjective evaluation exists.',
+            'Appraisal is revisable current meaning, not Memory fact; never submit chat plaintext or drive values.',
+          ] : []),
+          ...(handlers.openLoop ? [
+            'Only call xinchao_open_loop after a real xinchao_event leaves a bounded unresolved relationship matter, task, or shared plan.',
+            'Open Loop is bounded current unfinished state, not Memory fact and not a permanent attachment.',
+            'Resolve requires a later real event; release means deliberate letting go, not objective completion. Never submit chat plaintext or drive values.',
+          ] : []),
+          ...triggerInstructions,
         ].join(''),
       }),
     };
@@ -328,7 +528,16 @@ export async function handleMcpMessage(payload, handlers) {
     return { status: 200, body: response(id, {}) };
   }
   if (method === 'tools/list') {
-    return { status: 200, body: response(id, { tools: XINCHAO_TOOLS }) };
+    return {
+      status: 200,
+      body: response(id, {
+        tools: toolsForTriggerPolicy(
+          handlers.triggerPolicy,
+          Boolean(handlers.appraisal),
+          Boolean(handlers.openLoop),
+        ),
+      }),
+    };
   }
   if (method === 'tools/call') {
     try {

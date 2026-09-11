@@ -1,31 +1,6 @@
-import { realpathSync } from 'node:fs';
-import { basename, dirname, isAbsolute, resolve } from 'node:path';
-import {
-  STATE_PUBLICATION_PROFILE_CONTROLLED_READER_V1,
-  STATE_PUBLICATION_PROFILE_PRIVATE,
-  inspectStatePublicationProfile,
-} from './state-publication-profile.js';
-
 function bool(name, fallback = false) {
   const raw = process.env[name];
   return raw == null ? fallback : ['1', 'true', 'yes', 'on'].includes(raw.toLowerCase());
-}
-
-function optionalInteger(name) {
-  const raw = process.env[name];
-  if (raw == null || raw === '') return null;
-  const parsed = Number(raw);
-  if (!Number.isSafeInteger(parsed) || parsed < 1) throw new Error(`${name} must be a positive integer`);
-  return parsed;
-}
-
-function canonicalParent(name, value) {
-  if (!isAbsolute(String(value || ''))) throw new Error(`${name} must be an absolute path`);
-  try {
-    return realpathSync(dirname(resolve(String(value))));
-  } catch {
-    throw new Error(`${name} parent directory must already exist`);
-  }
 }
 
 function number(name, fallback, min, max) {
@@ -36,17 +11,22 @@ function number(name, fallback, min, max) {
 
 export function loadConfig() {
   const agentName = process.env.AGENT_NAME ?? 'AI 助手';
-  // 默认值会直接出现在推送和桥消息里被本人读到，所以不用「用户」这种后台称呼。
-  // 自己部署的人应该设成对方真正的名字，这只是没设时的兜底。
-  const notificationRecipient = process.env.NOTIFICATION_RECIPIENT ?? '你的人类';
+  const notificationRecipient = process.env.NOTIFICATION_RECIPIENT ?? '用户';
   return {
     identity: { agentName, notificationRecipient },
     port: number('PORT', 18110, 1, 65535),
     serviceToken: process.env.SERVICE_TOKEN ?? '',
     statePath: process.env.STATE_PATH ?? '/app/state/state.json',
-    statePublicationProfile: process.env.STATE_PUBLICATION_PROFILE ?? STATE_PUBLICATION_PROFILE_PRIVATE,
-    stateReaderGid: optionalInteger('STATE_READER_GID'),
     journalPath: process.env.TRANSITION_JOURNAL_PATH ?? '/app/state/transitions.jsonl',
+    mindV2: {
+      storeEnabled: bool('MIND_V2_STORE_ENABLED', false),
+      statePath: process.env.MIND_V2_STATE_PATH ?? '/var/lib/xinchao-chatgpt/mind-v2-state.json',
+      appraisalsEnabled: bool('MIND_V2_APPRAISALS_ENABLED', false),
+      openLoopsEnabled: bool('MIND_V2_OPEN_LOOPS_ENABLED', false),
+      recallDeliveryReceiptsEnabled: bool('MIND_V2_RECALL_DELIVERY_RECEIPTS_ENABLED', false),
+      resonanceEnabled: bool('MIND_V2_RESONANCE_ENABLED', false),
+      projectionEnabled: bool('MIND_V2_PROJECTION_ENABLED', false),
+    },
     settleIntervalMinutes: number('SETTLE_INTERVAL_MINUTES', 15, 1, 1440),
     sleepAfterMinutes: number('SLEEP_AFTER_MINUTES', 90, 5, 10080),
     shadowMode: bool('SHADOW_MODE', true),
@@ -72,6 +52,25 @@ export function loadConfig() {
       breathMaxResults: number('OMBRE_BREATH_MAX_RESULTS', 3, 1, 10),
       breathMaxTokens: number('OMBRE_BREATH_MAX_TOKENS', 800, 200, 3000)
     },
+    memoryV1: {
+      enabled: bool('MEMORY_V1_ENABLED', false),
+      shadowEnabled: bool('MEMORY_V1_SHADOW_ENABLED', false),
+      url: process.env.MEMORY_V1_MCP_URL ?? '',
+      token: process.env.MEMORY_V1_MCP_TOKEN ?? '',
+      timeoutMs: number('MEMORY_V1_TIMEOUT_MS', 8000, 500, 30000),
+      maxResults: number('MEMORY_V1_MAX_RESULTS', 6, 1, 12),
+      maxTokens: number('MEMORY_V1_MAX_TOKENS', 900, 200, 3000),
+      detailFetches: number('MEMORY_V1_DETAIL_FETCHES', 1, 0, 3),
+      continuityDays: number('MEMORY_V1_CONTINUITY_DAYS', 30, 1, 365),
+      dedupeTtlMinutes: number('MEMORY_V1_DEDUPE_TTL_MINUTES', 30, 1, 1440),
+      shadowContextEnabled: bool('MEMORY_V1_SHADOW_CONTEXT_ENABLED', false),
+      contextEnabled: bool('MEMORY_V1_CONTEXT_ENABLED', false),
+      shadowContextMaxTokens: number('MEMORY_V1_SHADOW_CONTEXT_MAX_TOKENS', 2200, 200, 4000),
+      shadowContextMemoryMaxTokens: number('MEMORY_V1_SHADOW_CONTEXT_MEMORY_MAX_TOKENS', 120, 40, 600),
+      shadowContextMemoryMaxRatio: number('MEMORY_V1_SHADOW_CONTEXT_MEMORY_MAX_RATIO', 0.5, 0.05, 0.6),
+      shadowContextMaxReferences: number('MEMORY_V1_SHADOW_CONTEXT_MAX_REFERENCES', 3, 1, 8),
+      shadowContextPerMemoryMaxTokens: number('MEMORY_V1_SHADOW_CONTEXT_PER_MEMORY_MAX_TOKENS', 55, 40, 300),
+    },
     context: {
       enabled: bool('CONTEXT_ENVELOPE_ENABLED', true),
       ombreEnabled: bool('CONTEXT_OMBRE_ENABLED', false),
@@ -95,30 +94,13 @@ export function loadConfig() {
       accessTtlSeconds: number('OAUTH_ACCESS_TTL_SECONDS', 86400, 300, 2592000),
       refreshTtlSeconds: number('OAUTH_REFRESH_TTL_SECONDS', 31536000, 86400, 63072000),
     },
-    dashboard: {
-      enabled: bool('DASHBOARD_ENABLED', false),
-      publicBaseUrl: (process.env.DASHBOARD_PUBLIC_BASE_URL ?? process.env.OAUTH_PUBLIC_BASE_URL ?? '').replace(/\/$/, ''),
-      accessToken: process.env.DASHBOARD_ACCESS_TOKEN ?? '',
-      sessionTtlSeconds: number('DASHBOARD_SESSION_TTL_SECONDS', 43200, 900, 604800),
-      includePrivateText: bool('DASHBOARD_INCLUDE_PRIVATE_TEXT', false),
-      dreamLimit: number('DASHBOARD_DREAM_LIMIT', 12, 1, 30),
-      // 允许哪些网页来源直接从浏览器读这台心潮（逗号分隔的完整来源）。
-      // 默认空 = 不放行任何跨源请求，行为与以前完全一致。
-      // 只有心潮和浏览器在同一台机器、又想用别人的网页前端时才需要设。
-      allowedOrigins: String(process.env.DASHBOARD_ALLOWED_ORIGINS ?? '')
-        .split(',').map((value) => value.trim().replace(/\/$/, '')).filter(Boolean),
-    },
     interaction: {
       maxEffectsPerDay: number('INTERACTION_MAX_EFFECTS_PER_DAY', 24, 1, 96),
       timeZone: process.env.INTERACTION_TIME_ZONE ?? process.env.SETTLE_TIME_ZONE ?? 'Asia/Shanghai',
     },
-    bridge: {
-      enabled: bool('BRIDGE_ENABLED', false),
-      machineToken: process.env.BRIDGE_MACHINE_TOKEN ?? '',
-      statePath: process.env.BRIDGE_STATE_PATH ?? '/app/state/bridge-queue.json',
-      maxEntries: number('BRIDGE_MAX_ENTRIES', 500, 10, 5000),
-      ttlHours: number('BRIDGE_TTL_HOURS', 168, 1, 720),
-      pollSeconds: number('BRIDGE_POLL_SECONDS', 15, 2, 300),
+    chatgptTrigger: {
+      enabled: bool('CHATGPT_TRIGGER_POLICY_ENABLED', false),
+      contextLongGapHours: number('CHATGPT_TRIGGER_CONTEXT_LONG_GAP_HOURS', 6, 1, 72),
     },
     heartbeat: {
       filePath: process.env.OMBRE_HEARTBEAT_FILE ?? '/memory-data/heartbeat.json',
@@ -159,31 +141,6 @@ export function loadConfig() {
 }
 
 export function validateConfig(config) {
-  let publication;
-  try {
-    publication = inspectStatePublicationProfile(config.statePublicationProfile);
-  } catch {
-    throw new Error('STATE_PUBLICATION_PROFILE must be private or controlled-reader-v1');
-  }
-  if (publication.profile === STATE_PUBLICATION_PROFILE_CONTROLLED_READER_V1) {
-    if (!Number.isSafeInteger(config.stateReaderGid) || config.stateReaderGid < 1) {
-      throw new Error('STATE_READER_GID is required for controlled-reader-v1');
-    }
-    if (!isAbsolute(config.statePath) || basename(config.statePath) !== 'state.json') {
-      throw new Error('controlled-reader-v1 requires an absolute dedicated STATE_PATH ending in state.json');
-    }
-    const stateDirectory = canonicalParent('STATE_PATH', config.statePath);
-    const forbiddenNeighbors = [
-      ['TRANSITION_JOURNAL_PATH', config.journalPath],
-      ['OAUTH_STATE_PATH', config.oauth?.statePath],
-      ['BRIDGE_STATE_PATH', config.bridge?.statePath],
-    ];
-    if (forbiddenNeighbors.some(([name, value]) => canonicalParent(name, value) === stateDirectory)) {
-      throw new Error('controlled-reader-v1 STATE_PATH must have a dedicated parent directory');
-    }
-  } else if (config.stateReaderGid != null) {
-    throw new Error('STATE_READER_GID is only valid for controlled-reader-v1');
-  }
   const externalMemoryEnabled = Boolean(
     config.ombre.readEnabled
     || config.ombre.writeEnabled
@@ -201,32 +158,40 @@ export function validateConfig(config) {
       );
     }
   }
-  if (config.dashboard?.enabled) {
-    const accessToken = String(config.dashboard.accessToken || '');
-    if (accessToken.length < 32) {
-      throw new Error('DASHBOARD_ACCESS_TOKEN must contain at least 32 characters when Dashboard is enabled');
-    }
-    if (accessToken === String(config.serviceToken || '')) {
-      throw new Error('DASHBOARD_ACCESS_TOKEN must be different from SERVICE_TOKEN');
-    }
-    const publicBaseUrl = String(config.dashboard.publicBaseUrl || '');
-    if (!publicBaseUrl) {
-      throw new Error('DASHBOARD_PUBLIC_BASE_URL is required when Dashboard is enabled');
-    }
-    let parsed;
-    try { parsed = new URL(publicBaseUrl); }
-    catch { throw new Error('DASHBOARD_PUBLIC_BASE_URL must be a valid URL'); }
-    const local = ['localhost', '127.0.0.1', '::1'].includes(parsed.hostname);
-    if (parsed.protocol !== 'https:' && !(local && parsed.protocol === 'http:')) {
-      throw new Error('DASHBOARD_PUBLIC_BASE_URL must use HTTPS outside localhost');
-    }
+  if (config.memoryV1?.enabled && !String(config.memoryV1.url || '').trim()) {
+    throw new Error('MEMORY_V1_MCP_URL is required when Memory V1 is enabled');
   }
-  if (config.bridge?.enabled) {
-    const token = String(config.bridge.machineToken || '');
-    if (token.length < 32) throw new Error('BRIDGE_MACHINE_TOKEN must contain at least 32 characters when Bridge is enabled');
-    if ([config.serviceToken, config.dashboard?.accessToken].filter(Boolean).includes(token)) {
-      throw new Error('BRIDGE_MACHINE_TOKEN must be independent from service and dashboard tokens');
-    }
+  if (config.mindV2?.appraisalsEnabled && !config.mindV2?.storeEnabled) {
+    throw new Error('MIND_V2_STORE_ENABLED is required when Appraisal is enabled');
+  }
+  if (config.mindV2?.openLoopsEnabled && !config.mindV2?.storeEnabled) {
+    throw new Error('MIND_V2_STORE_ENABLED is required when Open Loop is enabled');
+  }
+  if (config.mindV2?.recallDeliveryReceiptsEnabled && !config.mindV2?.storeEnabled) {
+    throw new Error('MIND_V2_STORE_ENABLED is required when Recall Delivery Receipt is enabled');
+  }
+  if (config.mindV2?.resonanceEnabled && !config.mindV2?.storeEnabled) {
+    throw new Error('MIND_V2_STORE_ENABLED is required when Memory Resonance is enabled');
+  }
+  if (config.mindV2?.resonanceEnabled && !config.mindV2?.recallDeliveryReceiptsEnabled) {
+    throw new Error('MIND_V2_RECALL_DELIVERY_RECEIPTS_ENABLED is required when Memory Resonance is enabled');
+  }
+  if (config.mindV2?.projectionEnabled && !config.mindV2?.storeEnabled) {
+    throw new Error('MIND_V2_PROJECTION_ENABLED requires MIND_V2_STORE_ENABLED');
   }
   return config;
+}
+
+export function validateServiceToken(value) {
+  const token = String(value ?? '');
+  if (!token) throw new Error('SERVICE_TOKEN is required');
+  if (/^replace-with/i.test(token)) {
+    throw new Error(
+      'SERVICE_TOKEN is still the placeholder from .env.example — generate a real one: openssl rand -hex 32',
+    );
+  }
+  if (token.length < 32) {
+    throw new Error('SERVICE_TOKEN must be at least 32 characters — generate one: openssl rand -hex 32');
+  }
+  return token;
 }
