@@ -19,13 +19,25 @@ const iso = (v) => new Date(v).toISOString();
 
 function initial() { return { schemaVersion: 1, items: [], audit: [] }; }
 
+class VolatileStateStore {
+  constructor(factory) { this.state = factory(); }
+
+  async read() { return structuredClone(this.state); }
+
+  async update(mutator) {
+    const draft = structuredClone(this.state);
+    this.state = structuredClone((await mutator(draft)) ?? draft);
+    return structuredClone(this.state);
+  }
+}
+
 function newId(now) {
   return `box-${now.getTime().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 export class BlackBox {
-  constructor(path) {
-    this.store = new StateStore(path, initial);
+  constructor(path, { persistent = true } = {}) {
+    this.store = persistent ? new StateStore(path, initial) : new VolatileStateStore(initial);
   }
 
   async init() { await this.store.read(); }

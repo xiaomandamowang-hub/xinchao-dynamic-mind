@@ -62,6 +62,7 @@ function emotionForOmbre(state) {
 
 const config = validateConfig(loadConfig());
 validateServiceToken(config.serviceToken);
+const privateContinuityDelegated = config.privateContinuity.authority === 'guimai';
 
 const store = new StateStore(config.statePath, () => newState(), {
   publicationProfile: config.statePublicationProfile,
@@ -81,7 +82,7 @@ const mindV2ProjectionEnabled = config.mindV2.storeEnabled
 const mindV2SourceReceiptsEnabled = appraisalEnabled || openLoopEnabled;
 const model = new ModelClient(config.model);
 const ombre = new OmbreClient(config.ombre);
-const blackBox = new BlackBox(config.box.statePath);
+const blackBox = new BlackBox(config.box.statePath, { persistent: !privateContinuityDelegated });
 const memoryV1 = new MemoryV1Client(config.memoryV1);
 const memoryV1Shadow = new MemoryV1ShadowObserver(memoryV1, {
   ttlMinutes: config.memoryV1.dedupeTtlMinutes,
@@ -104,7 +105,7 @@ const dashboardAuth = new DashboardAuth({
 });
 const bridgeQueue = new BridgeQueue(config.bridge.statePath, config.bridge);
 const cabin = new CabinStore(config.cabin.statePath, config.cabin);
-const personality = new PersonalityStore(config.personalityPath);
+const personality = new PersonalityStore(privateContinuityDelegated ? '' : config.personalityPath);
 const bridgeStreams = new Set();
 await oauth.init();
 let cyclePromise = null;
@@ -1486,6 +1487,18 @@ function cabinLedgerInput(payload = {}) {
   };
 }
 
+async function assertPrivateContinuityDelegationReady() {
+  if (!privateContinuityDelegated) return;
+  const snapshot = await store.read();
+  const livePending = (Array.isArray(snapshot.pending) ? snapshot.pending : []).filter((item) => item
+    && item.status !== 'consumed'
+    && item.disposition !== 'dropped'
+    && String(item.content ?? '').trim());
+  if (livePending.length > 0) throw new Error('PRIVATE_CONTINUITY_MIGRATION_REQUIRED');
+}
+
+await assertPrivateContinuityDelegationReady();
+
 const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url, 'http://localhost');
@@ -1500,6 +1513,8 @@ const server = createServer(async (request, response) => {
         system: 'xinchao-dynamic-mind',
         mode: config.shadowMode ? 'shadow' : 'active',
         version: SYSTEM_VERSION,
+        private_continuity_authority: config.privateContinuity.authority,
+        legacy_private_stores: privateContinuityDelegated ? 'disabled' : 'local',
       });
     }
     if (await oauth.handle(request, response, url)) return;
@@ -1722,6 +1737,7 @@ const server = createServer(async (request, response) => {
       let recallDeliveryDraft = null;
       const result = await handleMcpMessage(payload, {
         defaultSessionId: sessionId,
+        privateContinuityAuthority: config.privateContinuity.authority,
         triggerPolicy: config.chatgptTrigger,
         context: async (args) => {
           if (!config.context.enabled) throw new Error('心潮 Context Envelope 当前未启用');
@@ -1897,14 +1913,18 @@ server.listen(config.port, '127.0.0.1', async () => {
   await blackBox.init();
   // 3.3 升级迁移：攒下的话（pending_from_me）退役，还没说出口、也没被放下的条目搬进黑匣子当备忘，然后从状态里拿掉。
   try {
-    const snapshot = await store.read();
-    const leftovers = (Array.isArray(snapshot.pending) ? snapshot.pending : []).filter((item) => item?.status !== 'consumed' && item?.disposition !== 'dropped' && String(item?.content ?? '').trim());
-    for (const item of leftovers) {
-      await blackBox.put({ text: String(item.content).trim(), kind: 'memo', title: `从攒下的话迁来 · ${item.kind ?? ''}`.trim(), surface: true });
-    }
-    if (Array.isArray(snapshot.pending)) {
-      await updateState({ type: 'pending_retired', source: 'migration', details: { migrated: leftovers.length }, at: new Date() }, (current) => { delete current.pending; return current; });
-      log('pending_retired', { migrated: leftovers.length });
+    if (privateContinuityDelegated) {
+      log('private_continuity_authority', { authority: 'guimai', legacyStores: 'disabled' });
+    } else {
+      const snapshot = await store.read();
+      const leftovers = (Array.isArray(snapshot.pending) ? snapshot.pending : []).filter((item) => item?.status !== 'consumed' && item?.disposition !== 'dropped' && String(item?.content ?? '').trim());
+      for (const item of leftovers) {
+        await blackBox.put({ text: String(item.content).trim(), kind: 'memo', title: `从攒下的话迁来 · ${item.kind ?? ''}`.trim(), surface: true });
+      }
+      if (Array.isArray(snapshot.pending)) {
+        await updateState({ type: 'pending_retired', source: 'migration', details: { migrated: leftovers.length }, at: new Date() }, (current) => { delete current.pending; return current; });
+        log('pending_retired', { migrated: leftovers.length });
+      }
     }
   } catch (error) { log('pending_migration_failed', { message: error.message }); }
   if (config.bridge.enabled) await bridgeQueue.init();

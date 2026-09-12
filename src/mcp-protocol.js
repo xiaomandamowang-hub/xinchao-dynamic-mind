@@ -668,6 +668,14 @@ function personalityReflectArgs(args = {}) {
   };
 }
 
+const DELEGATED_PRIVATE_CONTINUITY_TOOLS = new Set([
+  'xinchao_box',
+  'xinchao_personality_reflect',
+  'xinchao_personality_stats',
+  'xinchao_anchor_update',
+]);
+const DELEGATED_PRIVATE_CONTINUITY_MESSAGE = '私密连续性由归脉托管，请使用归脉中的对应工具。';
+
 function appraisalArgs(args = {}) {
   return {
     action: args.action, operationId: args.operation_id, sourceEventId: args.source_event_id,
@@ -700,6 +708,9 @@ async function callTool(name, args, handlers) {
 
 async function callToolInner(name, args, handlers) {
   const fallbackSessionId = handlers.defaultSessionId ?? '';
+  if (handlers.privateContinuityAuthority === 'guimai' && DELEGATED_PRIVATE_CONTINUITY_TOOLS.has(name)) {
+    return toolError(DELEGATED_PRIVATE_CONTINUITY_MESSAGE);
+  }
   if (name === 'xinchao_context') {
     const envelope = await handlers.context(contextArgs(args, fallbackSessionId));
     const text = envelope.delivered

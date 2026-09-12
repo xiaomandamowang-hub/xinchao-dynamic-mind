@@ -47,6 +47,9 @@ export function loadConfig() {
     statePublicationProfile: process.env.STATE_PUBLICATION_PROFILE ?? STATE_PUBLICATION_PROFILE_PRIVATE,
     stateReaderGid: optionalInteger('STATE_READER_GID'),
     personalityPath: process.env.PERSONALITY_PATH ?? '/app/state/personality.json',
+    privateContinuity: {
+      authority: String(process.env.PRIVATE_CONTINUITY_AUTHORITY ?? 'local').trim().toLowerCase(),
+    },
     personality: {
       // Optional presentation metadata only. Scores and reasons still come
       // exclusively from the deployment-side, read-only personality mirror.
@@ -260,6 +263,10 @@ export function loadConfig() {
 }
 
 export function validateConfig(config) {
+  const privateContinuityAuthority = String(config.privateContinuity?.authority ?? 'local');
+  if (!['local', 'guimai'].includes(privateContinuityAuthority)) {
+    throw new Error('PRIVATE_CONTINUITY_AUTHORITY must be local or guimai');
+  }
   let publication;
   try {
     publication = inspectStatePublicationProfile(config.statePublicationProfile);

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { access, mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -36,6 +36,16 @@ test('kind falls back to other and text is required', async () => {
   const x = await box.put({ text: 'x', kind: 'whatever' });
   assert.equal(x.kind, 'other');
   await assert.rejects(() => box.put({ text: '   ' }), /text/);
+});
+
+test('volatile black box supports runtime reads without creating a legacy file', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'box-volatile-'));
+  const path = join(dir, 'black-box.json');
+  const box = new BlackBox(path, { persistent: false });
+  await box.init();
+  const item = await box.put({ text: 'transient only', kind: 'memo' });
+  assert.equal((await box.read(item.id)).text, 'transient only');
+  await assert.rejects(() => access(path), { code: 'ENOENT' });
 });
 
 test('surfaced items show only titles for the envelope', async () => {

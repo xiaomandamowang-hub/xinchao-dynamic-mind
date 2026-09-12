@@ -55,6 +55,25 @@ test('AI can submit one complete monthly personality reflection through MCP', as
   assert.equal(received.dimensions.length, 14);
 });
 
+test('delegated private continuity tools fail closed without calling local handlers', async () => {
+  let calls = 0;
+  const handlers = {
+    privateContinuityAuthority: 'guimai',
+    box: async () => { calls += 1; },
+    personalityReflect: async () => { calls += 1; },
+    personalityStats: async () => { calls += 1; },
+    personalityAnchorUpdate: async () => { calls += 1; },
+  };
+  for (const name of [
+    'xinchao_box', 'xinchao_personality_reflect', 'xinchao_personality_stats', 'xinchao_anchor_update',
+  ]) {
+    const result = await handleMcpMessage(request('tools/call', { name, arguments: {} }), handlers);
+    assert.equal(result.body.result.isError, true);
+    assert.equal(result.body.result.content[0].text, '私密连续性由归脉托管，请使用归脉中的对应工具。');
+  }
+  assert.equal(calls, 0);
+});
+
 test('OB failure does not remove Xinchao or board tools', async () => {
   const result = await handleMcpMessage(request('tools/list'), {
     boardEnabled: true,

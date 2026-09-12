@@ -30,6 +30,10 @@ function config(overrides = {}) {
       projectionEnabled: false,
       ...(overrides.mindV2 || {}),
     },
+    privateContinuity: {
+      authority: 'local',
+      ...(overrides.privateContinuity || {}),
+    },
   };
 }
 
@@ -37,6 +41,15 @@ function config(overrides = {}) {
 test('external memory remains optional when every integration is disabled', () => {
   const value = config();
   assert.equal(validateConfig(value), value);
+});
+
+test('private continuity authority accepts only local or guimai', () => {
+  assert.equal(validateConfig(config({ privateContinuity: { authority: 'local' } })).privateContinuity.authority, 'local');
+  assert.equal(validateConfig(config({ privateContinuity: { authority: 'guimai' } })).privateContinuity.authority, 'guimai');
+  assert.throws(
+    () => validateConfig(config({ privateContinuity: { authority: 'other' } })),
+    /PRIVATE_CONTINUITY_AUTHORITY must be local or guimai/,
+  );
 });
 
 
