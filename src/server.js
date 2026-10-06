@@ -556,6 +556,29 @@ async function recordConversationEvent(event, source = 'api', now = new Date()) 
     });
     return applied.state;
   });
+  const persisted = await store.read();
+  const trajectoryKey = applied.emotion?.trajectoryKey;
+  const persistedTrajectory = trajectoryKey
+    ? persisted.emotionTrajectories?.[trajectoryKey]
+    : null;
+  const verification = {
+    verified: persisted.revision === state.revision
+      && (applied.interaction?.applied !== true || persisted.interactionUsage)
+      && (applied.emotion?.applied !== true || Boolean(persistedTrajectory)),
+    revision: persisted.revision,
+    interactionApplied: Boolean(applied.interaction?.applied),
+    emotionRecorded: Boolean(persistedTrajectory),
+    trajectoryKey: trajectoryKey || null,
+  };
+  let memory = { attempted: false, status: 'not_applicable', verified: false, attempts: 0 };
+  if (!applied.duplicate && applied.emotion?.memoryCandidate) {
+    try {
+      memory = await ombre.storeEmotionCandidate(applied.emotion.memoryCandidate);
+    } catch (error) {
+      memory = { attempted: true, status: 'write_failed', verified: false, attempts: 1 };
+      log('ombre_emotion_write_failed', { message: error.message, trajectoryKey });
+    }
+  }
   return {
     revision: state.revision,
     consciousness: state.consciousness,
@@ -564,6 +587,9 @@ async function recordConversationEvent(event, source = 'api', now = new Date()) 
     sessionCreated: applied.sessionCreated,
     duplicate: applied.duplicate,
     interaction: applied.interaction,
+    emotion: applied.emotion,
+    verification,
+    memory,
     settledHours: Number(applied.settled.elapsedHours.toFixed(4)),
   };
 }
@@ -806,6 +832,9 @@ const server = createServer(async (request, response) => {
             sessionCreated: result.sessionCreated,
             duplicate: result.duplicate,
             interaction: result.interaction,
+            emotion: result.emotion,
+            verification: result.verification,
+            memory: result.memory,
             settledHours: result.settledHours,
           };
         },

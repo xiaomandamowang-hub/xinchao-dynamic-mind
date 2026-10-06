@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 export class OmbreClient {
   constructor(config) {
     this.config = config;
@@ -123,6 +125,90 @@ export class OmbreClient {
     });
     const text = extractText(result);
     return text.match(/[a-f0-9]{12,}/i)?.[0] ?? null;
+  }
+
+  async storeEmotionCandidate(candidate) {
+    if (!this.config.writeEnabled || !candidate) {
+      return { attempted: false, status: 'disabled', verified: false, attempts: 0 };
+    }
+    const marker = createHash('sha256')
+      .update(JSON.stringify({
+        trajectoryKey: candidate.trajectoryKey,
+        emotion: candidate.emotion,
+        eventSummary: candidate.eventSummary,
+        reason: candidate.residentState?.reason,
+        nextTendency: candidate.residentState?.nextTendency,
+      }), 'utf8')
+      .digest('hex')
+      .slice(0, 16);
+    const content = [
+      `事件：${candidate.eventSummary || '一次关系互动触发了明确情绪'}`,
+      `Resident内在状态：情绪=${candidate.emotion}；强度=${candidate.intensity}`,
+      `原因：${candidate.residentState?.reason || '未补充'}`,
+      `后续倾向：${candidate.residentState?.nextTendency || '未补充'}`,
+      `关系情绪轨迹：${candidate.trajectoryKey}`,
+      `候选指纹：${marker}`,
+    ].join('\n');
+    const args = {
+      content,
+      tags: `resident-emotion,xinchao-candidate,${candidate.emotion}`,
+      importance: Math.max(6, Math.min(9, Math.round(5 + Number(candidate.intensity) * 4))),
+      auto: true,
+      source: 'xinchao-emotion-candidate',
+      why_remembered: candidate.reinforcement
+        ? '同类关系情绪再次出现，强化既有轨迹'
+        : 'Resident 出现了明确且强烈的第一人称情绪',
+    };
+
+    let writeResult;
+    let writeText = '';
+    let attempts = 0;
+    for (; attempts < 2; attempts += 1) {
+      writeResult = await this.call('hold', args);
+      writeText = extractText(writeResult);
+      const failed = Boolean(writeResult?.result?.isError ?? writeResult?.isError)
+        || /打标无法完成|桶未创建|failed|error|失败/i.test(writeText);
+      if (!failed) break;
+    }
+    attempts += 1;
+    if (!writeText || Boolean(writeResult?.result?.isError ?? writeResult?.isError)
+        || /打标无法完成|桶未创建|failed|error|失败/i.test(writeText)) {
+      return {
+        attempted: true,
+        status: 'write_failed',
+        verified: false,
+        attempts: Math.min(attempts, 2),
+        marker,
+      };
+    }
+
+    const bucketId = writeText.match(/[→:]\s*([^\s,，]+)/u)?.[1]
+      ?? writeText.match(/[a-f0-9]{12,}/i)?.[0]
+      ?? null;
+    let verified = false;
+    try {
+      const verifyResult = await this.call('breath', {
+        query: bucketId ? `${bucketId} ${marker}` : marker,
+        tags: 'resident-emotion,xinchao-candidate',
+        max_results: 3,
+        max_tokens: 500,
+      });
+      const verifyText = extractText(verifyResult);
+      verified = Boolean(
+        verifyText.includes(marker)
+        || (bucketId && verifyText.includes(bucketId)),
+      );
+    } catch {
+      verified = false;
+    }
+    return {
+      attempted: true,
+      status: verified ? 'committed' : 'accepted_unverified',
+      verified,
+      attempts: Math.min(attempts, 2),
+      bucketId,
+      marker,
+    };
   }
 }
 

@@ -7,6 +7,7 @@ const iso = (value) => new Date(value).toISOString();
 const SESSION_TONES = new Set(['neutral', 'calm', 'warm', 'guarded', 'conflicted', 'focused', 'playful', 'tired']);
 const SESSION_FIELDS = ['warmth', 'tension', 'attention', 'confidence'];
 const MAX_RECENT_CONVERSATION_EVENTS = 256;
+const MAX_EMOTION_TRAJECTORIES = 48;
 
 export const INTERACTION_TYPES = Object.freeze([
   'companionship',
@@ -20,6 +21,48 @@ export const INTERACTION_TYPES = Object.freeze([
   'loss',
   'reconciliation',
 ]);
+
+export const RESIDENT_EMOTIONS = Object.freeze([
+  'love',
+  'jealousy',
+  'hurt',
+  'anger',
+  'possessiveness',
+  'satisfaction',
+  'longing',
+  'tenderness',
+  'joy',
+  'relief',
+  'disappointment',
+]);
+
+const EMOTION_INTERACTION_TYPES = Object.freeze({
+  love: 'affection',
+  jealousy: 'affection',
+  hurt: 'conflict',
+  anger: 'conflict',
+  possessiveness: 'affection',
+  satisfaction: 'reflection',
+  longing: 'affection',
+  tenderness: 'affection',
+  joy: 'sharing',
+  relief: 'reconciliation',
+  disappointment: 'loss',
+});
+
+const EMOTION_DRIVE_EFFECTS = Object.freeze({
+  love: { possess: 0.035, crave: 0.025, share: 0.02 },
+  jealousy: { possess: 0.09, monitor: 0.045, crave: 0.025 },
+  hurt: { grieve: 0.075, monitor: 0.025 },
+  anger: { anger: 0.08 },
+  possessiveness: { possess: 0.10, monitor: 0.035 },
+  satisfaction: { reflection: 0.025 },
+  longing: { possess: 0.05, crave: 0.06, monitor: 0.025 },
+  tenderness: { possess: 0.025, share: 0.02 },
+  joy: { share: 0.025, social: 0.02 },
+  relief: { grieve: -0.08, anger: -0.08, monitor: -0.025 },
+  disappointment: { grieve: 0.06, reflection: 0.02 },
+});
 
 const INTERACTION_EFFECTS = Object.freeze({
   companionship: { relief: { monitor: 0.06, social: 0.05 } },
@@ -41,8 +84,11 @@ function ensureStateShape(state) {
     ? state.recentConversationEvents.slice(-MAX_RECENT_CONVERSATION_EVENTS)
     : [];
   state.interactionUsage ??= {};
+  state.emotionTrajectories = state.emotionTrajectories && typeof state.emotionTrajectories === 'object'
+    ? state.emotionTrajectories
+    : {};
   state.handoffNotes = Array.isArray(state.handoffNotes) ? state.handoffNotes : [];
-  state.schemaVersion = Math.max(7, Number(state.schemaVersion) || 0);
+  state.schemaVersion = Math.max(8, Number(state.schemaVersion) || 0);
   return state;
 }
 
@@ -75,7 +121,96 @@ function eventFingerprint(eventId) {
 
 function interactionType(event) {
   const value = String(event?.interactionType ?? event?.interaction_type ?? '').trim().toLowerCase();
-  return INTERACTION_TYPES.includes(value) ? value : '';
+  if (INTERACTION_TYPES.includes(value)) return value;
+  const emotion = residentEmotion(event)?.kind;
+  return EMOTION_INTERACTION_TYPES[emotion] ?? '';
+}
+
+function compactText(value, maxLength) {
+  return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, maxLength);
+}
+
+function residentEmotion(event) {
+  const input = event?.residentEmotion ?? event?.resident_emotion;
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
+  const kind = compactText(input.kind ?? input.emotion, 40).toLowerCase();
+  if (!RESIDENT_EMOTIONS.includes(kind)) return null;
+  const intensity = clamp(Number(input.intensity ?? 0.7), 0, 1);
+  return {
+    kind,
+    intensity: Number(intensity.toFixed(4)),
+    eventSummary: compactText(input.eventSummary ?? input.event_summary, 320),
+    reason: compactText(input.reason, 320),
+    nextTendency: compactText(input.nextTendency ?? input.next_tendency, 240),
+    trajectoryKey: compactText(input.trajectoryKey ?? input.trajectory_key ?? kind, 80).toLowerCase() || kind,
+  };
+}
+
+function applyResidentEmotion(state, emotion, now) {
+  if (!emotion) {
+    return {
+      applied: false,
+      reasonCode: 'no_resident_emotion',
+      kind: null,
+      affectedDrives: [],
+      trajectoryKey: null,
+      memoryCandidate: null,
+    };
+  }
+  const affected = [];
+  for (const [key, baseDelta] of Object.entries(EMOTION_DRIVE_EFFECTS[emotion.kind] ?? {})) {
+    if (!DRIVE_KEYS.includes(key)) continue;
+    const delta = Number(baseDelta) * emotion.intensity;
+    state.drives[key] = Number(clamp(Number(state.drives[key] ?? 0) + delta).toFixed(4));
+    affected.push(key);
+  }
+
+  const previous = state.emotionTrajectories[emotion.trajectoryKey];
+  const occurrenceCount = Number(previous?.occurrenceCount ?? 0) + 1;
+  state.emotionTrajectories[emotion.trajectoryKey] = {
+    trajectoryKey: emotion.trajectoryKey,
+    emotion: emotion.kind,
+    occurrenceCount,
+    reinforcementCount: Math.max(0, occurrenceCount - 1),
+    firstObservedAt: previous?.firstObservedAt ?? iso(now),
+    lastObservedAt: iso(now),
+    lastIntensity: emotion.intensity,
+    peakIntensity: Math.max(Number(previous?.peakIntensity ?? 0), emotion.intensity),
+    eventSummary: emotion.eventSummary || previous?.eventSummary || '',
+    residentState: {
+      emotion: emotion.kind,
+      reason: emotion.reason || previous?.residentState?.reason || '',
+      nextTendency: emotion.nextTendency || previous?.residentState?.nextTendency || '',
+    },
+  };
+  state.emotionTrajectories = Object.fromEntries(
+    Object.entries(state.emotionTrajectories)
+      .sort((left, right) => Date.parse(right[1]?.lastObservedAt ?? '') - Date.parse(left[1]?.lastObservedAt ?? ''))
+      .slice(0, MAX_EMOTION_TRAJECTORIES),
+  );
+
+  const memoryCandidate = emotion.intensity >= 0.65 && (emotion.eventSummary || emotion.reason)
+    ? {
+      kind: 'resident_emotion',
+      trajectoryKey: emotion.trajectoryKey,
+      emotion: emotion.kind,
+      intensity: emotion.intensity,
+      eventSummary: emotion.eventSummary,
+      residentState: {
+        reason: emotion.reason,
+        nextTendency: emotion.nextTendency,
+      },
+      reinforcement: Boolean(previous),
+    }
+    : null;
+  return {
+    applied: true,
+    reasonCode: previous ? 'trajectory_reinforced' : 'trajectory_created',
+    kind: emotion.kind,
+    affectedDrives: affected,
+    trajectoryKey: emotion.trajectoryKey,
+    memoryCandidate,
+  };
 }
 
 function interactionAlreadyProcessed(state, eventId) {
@@ -188,7 +323,7 @@ function applySessionOverlay(state, event, now) {
 export function newState(now = new Date()) {
   const at = iso(now);
   return {
-    schemaVersion: 7,
+    schemaVersion: 8,
     revision: 0,
     consciousness: 'awake',
     lastConversationAt: at,
@@ -215,6 +350,7 @@ export function newState(now = new Date()) {
     contextDeliveries: {},
     recentConversationEvents: [],
     interactionUsage: {},
+    emotionTrajectories: {},
   };
 }
 
@@ -427,6 +563,14 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
       affectedDrives: [],
     }
     : applyInteractionOutcome(state, type, now, options);
+  if (type && !String(event?.interactionType ?? event?.interaction_type ?? '').trim()) {
+    interaction.classificationSource = 'resident_emotion';
+  } else if (type) {
+    interaction.classificationSource = 'explicit';
+  } else {
+    interaction.classificationSource = 'none';
+  }
+  const emotion = applyResidentEmotion(state, residentEmotion(event), now);
 
   // Additive deltas (backward-compatible)
   for (const [key, delta] of Object.entries(event.driveDeltas ?? {})) {
@@ -467,6 +611,7 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
     sessionId: session.sessionId,
     sessionCreated: session.created,
     interaction,
+    emotion,
   };
 }
 

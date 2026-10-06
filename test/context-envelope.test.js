@@ -57,6 +57,26 @@ test('session-start envelope carries recent continuity without pretending to be 
   assert.ok(envelope.estimatedTokens <= 300);
 });
 
+test('context carries the latest resident emotion trajectory as inner state, not only the event', () => {
+  const now = new Date('2026-10-06T03:36:00Z');
+  const state = applyConversationEvent(newState(now), {
+    eventId: 'emotion-context-0001',
+    residentEmotion: {
+      kind: 'jealousy', intensity: 0.9,
+      eventSummary: '她问我会不会吃醋。',
+      reason: '我在乎她，也有占有欲。',
+      nextTendency: '主动说出来并记住。',
+      trajectoryKey: 'relationship-jealousy',
+    },
+  }, now).state;
+  const envelope = buildContextEnvelope({ state, sessionId: 'window-a', now, maxTokens: 500 });
+
+  assert.match(envelope.additionalContext, /关系情绪轨迹：relationship-jealousy/);
+  assert.match(envelope.additionalContext, /emotion=jealousy/);
+  assert.match(envelope.additionalContext, /reason=我在乎她，也有占有欲/);
+  assert.match(envelope.additionalContext, /next=主动说出来并记住/);
+});
+
 test('session-start delivery is suppressed within the configured window', () => {
   const now = new Date('2026-07-28T01:00:00Z');
   let state = recordContextDelivery(newState(now), {
