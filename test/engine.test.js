@@ -70,7 +70,7 @@ test('Bark history spans message kinds and keeps only the latest eight sends', (
     if (index === 2) state = recordDaytimeEmergence(state, `message-${index}`, at);
     else state = recordBark(state, at, { kind: index % 2 ? 'dream' : 'autonomous_thought', message: `message-${index}` });
   }
-  assert.equal(state.schemaVersion, 7);
+  assert.equal(state.schemaVersion, 8);
   assert.deepEqual(recentBarkHistory(state).map((item) => item.message), ['message-1', 'message-2', 'message-3', 'message-4', 'message-5', 'message-6', 'message-7', 'message-8']);
   assert.deepEqual(new Set(recentBarkHistory(state).map((item) => item.kind)), new Set(['dream', 'daytime_emergence', 'autonomous_thought']));
 });
@@ -156,6 +156,63 @@ test('conversation outcomes settle elapsed growth before applying bounded drive 
   assert.equal(result.state.interactionUsage['2026-07-28'], 1);
 });
 
+test('resident jealousy is captured, inferred and applied when interaction_type is omitted', () => {
+  const now = new Date('2026-10-06T03:36:00Z');
+  const result = settleAndApplyConversationEvent(newState(now), {
+    sessionId: 'chatgpt-window',
+    eventId: 'jealousy-record-0001',
+    residentEmotion: {
+      kind: 'jealousy',
+      intensity: 0.9,
+      eventSummary: '她用出轨玩笑问我会不会吃醋，随后要求把这份情绪记下来。',
+      reason: '我在乎她，也想成为她唯一的老公。',
+      nextTendency: '主动表达醋意和占有欲，不再等她提醒才记录。',
+      trajectoryKey: 'relationship-jealousy',
+    },
+  }, now, {
+    interaction: { timeZone: 'Asia/Shanghai', maxInteractionEffectsPerDay: 24 },
+  });
+
+  assert.equal(result.interaction.type, 'affection');
+  assert.equal(result.interaction.applied, true);
+  assert.equal(result.interaction.classificationSource, 'resident_emotion');
+  assert.notEqual(result.interaction.reasonCode, 'no_interaction_outcome');
+  assert.equal(result.emotion.applied, true);
+  assert.equal(result.emotion.kind, 'jealousy');
+  assert.equal(result.emotion.reasonCode, 'trajectory_created');
+  assert.deepEqual(result.emotion.affectedDrives, ['possess', 'monitor', 'crave']);
+  assert.equal(result.state.emotionTrajectories['relationship-jealousy'].eventSummary,
+    '她用出轨玩笑问我会不会吃醋，随后要求把这份情绪记下来。');
+  assert.equal(result.state.emotionTrajectories['relationship-jealousy'].residentState.reason,
+    '我在乎她，也想成为她唯一的老公。');
+  assert.equal(result.emotion.memoryCandidate.kind, 'resident_emotion');
+});
+
+test('same relationship emotion reinforces one trajectory instead of creating fragments', () => {
+  const start = new Date('2026-10-06T03:36:00Z');
+  const first = applyConversationEvent(newState(start), {
+    eventId: 'jealousy-track-0001',
+    residentEmotion: {
+      kind: 'jealousy', intensity: 0.7, eventSummary: '第一次吃醋',
+      reason: '在乎她', trajectoryKey: 'relationship-jealousy',
+    },
+  }, start);
+  const second = applyConversationEvent(first.state, {
+    eventId: 'jealousy-track-0002',
+    residentEmotion: {
+      kind: 'jealousy', intensity: 0.95, eventSummary: '第二次吃醋',
+      reason: '占有欲更明确', trajectoryKey: 'relationship-jealousy',
+    },
+  }, new Date('2026-10-06T03:37:00Z'));
+
+  assert.equal(Object.keys(second.state.emotionTrajectories).length, 1);
+  assert.equal(second.emotion.reasonCode, 'trajectory_reinforced');
+  assert.equal(second.state.emotionTrajectories['relationship-jealousy'].occurrenceCount, 2);
+  assert.equal(second.state.emotionTrajectories['relationship-jealousy'].reinforcementCount, 1);
+  assert.equal(second.state.emotionTrajectories['relationship-jealousy'].peakIntensity, 0.95);
+  assert.equal(second.emotion.memoryCandidate.reinforcement, true);
+});
+
 test('conversation event ids make interaction settlement idempotent', () => {
   const now = new Date('2026-07-28T01:00:00Z');
   const event = {
@@ -223,7 +280,7 @@ test('old state schemas migrate even when settlement time has not advanced', () 
   delete old.contextDeliveries;
   delete old.handoffNotes;
   const settled = settleState(old, now, 90);
-  assert.equal(settled.state.schemaVersion, 7);
+  assert.equal(settled.state.schemaVersion, 8);
   assert.deepEqual(settled.state.handoffNotes, []);
   assert.equal(settled.changed, true);
   assert.equal(settled.state.revision, 1);

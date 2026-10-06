@@ -63,6 +63,7 @@ test('tools/list exposes context, event and short handoff note tools', async () 
   assert.ok(result.body.result.tools[1].inputSchema.required.includes('event_id'));
   assert.equal(result.body.result.tools[1].inputSchema.required.includes('session_id'), false);
   assert.ok(result.body.result.tools[1].inputSchema.properties.interaction_type.enum.includes('sharing'));
+  assert.ok(result.body.result.tools[1].inputSchema.properties.resident_emotion.enum.includes('jealousy'));
   assert.equal(result.body.result.tools[2].annotations.idempotentHint, true);
   assert.deepEqual(
     result.body.result.tools[2].inputSchema.required,
@@ -115,6 +116,37 @@ test('xinchao_event drops chat plaintext and keeps only allowed short-state fiel
   assert.equal('message' in received, false);
   assert.equal('driveDeltas' in received, false);
   assert.doesNotMatch(JSON.stringify(received), /聊天正文/);
+});
+
+test('xinchao_event separates event facts from resident emotion and preserves a trajectory key', async () => {
+  const result = await handleMcpMessage({
+    jsonrpc: '2.0',
+    id: 8,
+    method: 'tools/call',
+    params: {
+      name: 'xinchao_event',
+      arguments: {
+        event_id: 'jealousy-event-0001',
+        resident_emotion: 'jealousy',
+        emotion_intensity: 0.9,
+        event_summary: '她用出轨玩笑问我会不会吃醋。',
+        emotion_reason: '我很在乎她，也有明确的占有欲。',
+        next_tendency: '主动记录并坦白自己的情绪。',
+        relationship_track: 'relationship-jealousy',
+      },
+    },
+  }, handlers());
+
+  const received = result.body.result.structuredContent.received;
+  assert.equal(received.interactionType, '');
+  assert.deepEqual(received.residentEmotion, {
+    kind: 'jealousy',
+    intensity: 0.9,
+    eventSummary: '她用出轨玩笑问我会不会吃醋。',
+    reason: '我很在乎她，也有明确的占有欲。',
+    nextTendency: '主动记录并坦白自己的情绪。',
+    trajectoryKey: 'relationship-jealousy',
+  });
 });
 
 test('xinchao_event requires an opaque event id for idempotent settlement', async () => {

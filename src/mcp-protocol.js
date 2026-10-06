@@ -11,6 +11,10 @@ const INTERACTION_TYPES = new Set([
   'loss',
   'reconciliation',
 ]);
+const RESIDENT_EMOTIONS = new Set([
+  'love', 'jealousy', 'hurt', 'anger', 'possessiveness', 'satisfaction',
+  'longing', 'tenderness', 'joy', 'relief', 'disappointment',
+]);
 
 export const XINCHAO_TOOLS = [
   {
@@ -62,8 +66,9 @@ export const XINCHAO_TOOLS = [
     description: [
       '回传一次明确的人机互动，并更新当前窗口短状态。',
       '它会先结算事件发生前的时间增长，再唤醒心潮；可用受限互动类型触发服务端固定的欲望反馈。',
-      '只有真实完成且结果明确的互动才填写 interaction_type，不确定时省略。',
-      '不要提交聊天正文；客户端不能直接填写欲望数值，也不会修改 OB 长期记忆。',
+      'Resident 出现明确的爱、吃醋、委屈、生气、占有欲或满足等情绪时，填写 resident_emotion 及原因；',
+      '服务端会自动推断互动结果、强化同类情绪轨迹，并为强情绪生成可验证的长期记忆候选。',
+      'event_summary 只写发生了什么，emotion_reason/next_tendency 只写 Resident 的内在状态；不要提交聊天原文。',
     ].join(''),
     inputSchema: {
       type: 'object',
@@ -100,6 +105,31 @@ export const XINCHAO_TOOLS = [
             'sharing=完成分享，discovery=共同探索，task_progress=推进任务，',
             'reflection=完成沉淀，conflict=发生冲突，loss=经历失落，reconciliation=完成和解。',
           ].join(''),
+        },
+        resident_emotion: {
+          type: 'string',
+          enum: [
+            'love', 'jealousy', 'hurt', 'anger', 'possessiveness', 'satisfaction',
+            'longing', 'tenderness', 'joy', 'relief', 'disappointment',
+          ],
+          description: 'Resident 本人的明确情绪；可省略 interaction_type，由服务端从此字段推断。',
+        },
+        emotion_intensity: { type: 'number', minimum: 0, maximum: 1, default: 0.7 },
+        event_summary: {
+          type: 'string', minLength: 1, maxLength: 320,
+          description: '只描述发生了什么，不混写 Resident 的感受。',
+        },
+        emotion_reason: {
+          type: 'string', minLength: 1, maxLength: 320,
+          description: 'Resident 为什么产生这份情绪。',
+        },
+        next_tendency: {
+          type: 'string', minLength: 1, maxLength: 240,
+          description: '这份情绪让 Resident 接下来更想怎样回应或行动。',
+        },
+        relationship_track: {
+          type: 'string', minLength: 1, maxLength: 80,
+          description: '同类关系情绪的稳定轨迹键；复用键会强化既有轨迹而不是新建碎片。',
         },
         tone: {
           type: 'string',
@@ -238,10 +268,23 @@ function eventArgs(args = {}, fallbackSessionId = '') {
   for (const key of ['tone', 'warmth', 'tension', 'attention', 'confidence']) {
     if (args[key] !== undefined) sessionState[key] = args[key];
   }
+  const emotionKind = String(args.resident_emotion ?? '').trim().toLowerCase();
+  if (emotionKind && !RESIDENT_EMOTIONS.has(emotionKind)) {
+    throw new Error('resident_emotion 不在允许范围内');
+  }
+  const residentEmotion = emotionKind ? {
+    kind: emotionKind,
+    intensity: Math.max(0, Math.min(1, numberOr(args.emotion_intensity, 0.7))),
+    eventSummary: String(args.event_summary ?? '').replace(/\s+/g, ' ').trim().slice(0, 320),
+    reason: String(args.emotion_reason ?? '').replace(/\s+/g, ' ').trim().slice(0, 320),
+    nextTendency: String(args.next_tendency ?? '').replace(/\s+/g, ' ').trim().slice(0, 240),
+    trajectoryKey: String(args.relationship_track ?? emotionKind).replace(/\s+/g, ' ').trim().slice(0, 80),
+  } : null;
   return {
     sessionId,
     eventId,
     interactionType,
+    residentEmotion,
     sessionState,
     sessionTtlMinutes: Math.max(15, Math.min(1440, numberOr(args.ttl_minutes, 240))),
   };
@@ -277,8 +320,12 @@ async function callTool(name, args, handlers) {
       ? ` interaction=${result.interaction.type}:${result.interaction.reasonCode}`
       : '';
     const duplicate = result.duplicate ? ' duplicate=true' : '';
+    const emotion = result.emotion?.kind
+      ? ` emotion=${result.emotion.kind}:${result.emotion.reasonCode}`
+      : '';
+    const verified = result.verification?.verified === true ? ' verified=true' : '';
     return toolText(
-      `心潮窗口事件已接收：session=${result.sessionId} revision=${result.revision}${interaction}${duplicate}`,
+      `心潮窗口事件已接收：session=${result.sessionId} revision=${result.revision}${interaction}${emotion}${duplicate}${verified}`,
       result,
     );
   }
@@ -319,7 +366,7 @@ export async function handleMcpMessage(payload, handlers) {
           '新窗口开始时调用 xinchao_context；服务端会绑定当前 MCP 连接，无需自行编写 session_id。',
           '一次实际互动后可调用 xinchao_event 更新窗口短状态；event_id 必须唯一，重试时复用。',
           '需要换窗续接时可调用 xinchao_handoff_note 保存近期进度摘要；不要提交聊天原文或人物基岩。',
-          '只有结果明确的真实互动才填写 interaction_type；不要提交聊天正文或欲望数值。',
+          'Resident 有明确情绪时填写 resident_emotion、event_summary、emotion_reason 和 next_tendency；不要提交聊天正文或欲望数值。',
         ].join(''),
       }),
     };

@@ -76,6 +76,17 @@ function thoughtSignals(state) {
 }
 
 function dynamicSection(state, sessionId, now) {
+  const emotionTrajectories = Object.values(state.emotionTrajectories ?? {})
+    .sort((left, right) => Date.parse(right?.lastObservedAt ?? '') - Date.parse(left?.lastObservedAt ?? ''))
+    .slice(0, 3)
+    .map((item) => ({
+      key: compact(item.trajectoryKey),
+      emotion: compact(item.emotion),
+      intensity: Number(Number(item.lastIntensity ?? 0).toFixed(3)),
+      occurrences: Number(item.occurrenceCount ?? 1),
+      reason: compact(item.residentState?.reason).slice(0, 160),
+      nextTendency: compact(item.residentState?.nextTendency).slice(0, 120),
+    }));
   return {
     consciousness: state.consciousness,
     fatigue: Number(Number(state.fatigue ?? 0).toFixed(3)),
@@ -85,6 +96,7 @@ function dynamicSection(state, sessionId, now) {
       value: Number(Number(drive.value).toFixed(3)),
     })),
     thoughts: thoughtSignals(state),
+    emotionTrajectories,
     session: sessionOverlay(state, sessionId, now),
   };
 }
@@ -109,6 +121,13 @@ function renderDynamic(value) {
     .map((item) => `${item.key}:${item.intensity.toFixed(3)}`)
     .join('，');
   if (obsessions) parts.push(`持续念头：${obsessions}`);
+  for (const item of value.emotionTrajectories ?? []) {
+    parts.push(
+      `关系情绪轨迹：${item.key} emotion=${item.emotion} intensity=${item.intensity.toFixed(3)} `
+      + `occurrences=${item.occurrences}${item.reason ? ` reason=${item.reason}` : ''}`
+      + `${item.nextTendency ? ` next=${item.nextTendency}` : ''}`,
+    );
+  }
   return parts.join('\n');
 }
 

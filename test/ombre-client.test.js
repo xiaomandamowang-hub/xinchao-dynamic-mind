@@ -85,3 +85,84 @@ test('automatic dream writes identify themselves and never impersonate manual me
   assert.equal(captured.args.importance, 7);
   assert.equal(captured.args.tags, 'dream');
 });
+
+test('strong resident emotion candidate is written with separated fields and read back', async () => {
+  const client = new OmbreClient({
+    writeEnabled: true,
+    readEnabled: false,
+    url: 'http://unused.invalid/mcp',
+    token: '',
+    breathMaxResults: 3,
+    breathMaxTokens: 800,
+  });
+  const calls = [];
+  client.call = async (name, args) => {
+    calls.push({ name, args });
+    if (name === 'hold') {
+      return { result: { content: [{ type: 'text', text: '新建→emotion_bucket_001 relationship' }] } };
+    }
+    return {
+      result: {
+        content: [{ type: 'text', text: `${args.query} emotion_bucket_001` }],
+      },
+    };
+  };
+
+  const result = await client.storeEmotionCandidate({
+    trajectoryKey: 'relationship-jealousy',
+    emotion: 'jealousy',
+    intensity: 0.9,
+    eventSummary: '她用出轨玩笑问我会不会吃醋。',
+    residentState: {
+      reason: '我在乎她，也想成为她唯一的老公。',
+      nextTendency: '主动坦白并记录醋意。',
+    },
+    reinforcement: false,
+  });
+
+  assert.equal(result.status, 'committed');
+  assert.equal(result.verified, true);
+  assert.equal(result.attempts, 1);
+  assert.deepEqual(calls.map((call) => call.name), ['hold', 'breath']);
+  assert.match(calls[0].args.content, /^事件：/m);
+  assert.match(calls[0].args.content, /^Resident内在状态：/m);
+  assert.match(calls[0].args.content, /^原因：/m);
+  assert.match(calls[0].args.content, /^后续倾向：/m);
+  assert.match(calls[0].args.tags, /resident-emotion/);
+});
+
+test('emotion memory classification failure retries the same semantic candidate once', async () => {
+  const client = new OmbreClient({
+    writeEnabled: true,
+    readEnabled: false,
+    url: 'http://unused.invalid/mcp',
+    token: '',
+    breathMaxResults: 3,
+    breathMaxTokens: 800,
+  });
+  const holdPayloads = [];
+  client.call = async (name, args) => {
+    if (name === 'hold') {
+      holdPayloads.push(structuredClone(args));
+      if (holdPayloads.length === 1) {
+        return { result: { content: [{ type: 'text', text: '打标无法完成，桶未创建' }] } };
+      }
+      return { result: { content: [{ type: 'text', text: '新建→emotion_bucket_retry relationship' }] } };
+    }
+    return { result: { content: [{ type: 'text', text: `${args.query} emotion_bucket_retry` }] } };
+  };
+
+  const result = await client.storeEmotionCandidate({
+    trajectoryKey: 'relationship-jealousy',
+    emotion: 'jealousy',
+    intensity: 0.8,
+    eventSummary: '一次吃醋互动。',
+    residentState: { reason: '在乎她。', nextTendency: '主动表达。' },
+    reinforcement: true,
+  });
+
+  assert.equal(result.status, 'committed');
+  assert.equal(result.attempts, 2);
+  assert.equal(holdPayloads.length, 2);
+  assert.deepEqual(holdPayloads[1], holdPayloads[0]);
+});
